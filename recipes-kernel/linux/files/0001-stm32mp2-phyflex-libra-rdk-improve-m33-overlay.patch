@@ -1,0 +1,53 @@
+From 79d743d548b82a6f9a94a45ebadafee770879933 Mon Sep 17 00:00:00 2001
+From: tloan <tloan@phytec.com>
+Date: Thu, 19 Nov 2026 22:43:22 +0000
+Subject: [PATCH] stm32mp2-phyflex-libra-rdk: improve m33 overlay
+
+disables various peripherals used by the Cortex-M33 Examples.
+
+Signed-off-by: tloan <tloan@phytec.com>
+---
+ ...m32mp2-phyflex-libra-rdk-m33-examples.dtso | 23 +++++++++++++++++++
+ 1 file changed, 23 insertions(+)
+
+diff --git a/arch/arm64/boot/dts/st/overlays/stm32mp2-phyflex-libra-rdk-m33-examples.dtso b/arch/arm64/boot/dts/st/overlays/stm32mp2-phyflex-libra-rdk-m33-examples.dtso
+index 22341521c753..58e024cbd75e 100644
+--- a/arch/arm64/boot/dts/st/overlays/stm32mp2-phyflex-libra-rdk-m33-examples.dtso
++++ b/arch/arm64/boot/dts/st/overlays/stm32mp2-phyflex-libra-rdk-m33-examples.dtso
+@@ -29,6 +29,17 @@ &usb3_connector {
+ 	status = "disabled";
+ };
+ 
++/* Disable Cortex-M0+ because this kernel/BSP dynamically assigns the M0+ and
++ * M33 to remoteproc0 and remoteproc1. They can be assigned differently between
++ * boots.
++ *
++ * We need Cortex-M33 to reliably come up as remoteproc0 in order for the
++ * STM32CubeIDE to remotely debug the core.
++ */
++&m0_rproc {
++	status = "disabled";
++};
++
+ &uart5 {
+ 	status = "disabled";
+ };
+@@ -36,3 +47,15 @@ &uart5 {
+ &dwc3 {
+ 	role-switch-default-mode = "peripheral";
+ };
++
++&i2c1 {
++	status = "disabled";
++};
++
++&spi2 {
++	status = "disabled";
++};
++
++&adc_12 {
++	status = "disabled";
++};
+-- 
+2.43.0
+
