@@ -1,0 +1,519 @@
+From 229d51b58e95d3a69d4ab6cd08710e66a14cf741 Mon Sep 17 00:00:00 2001
+From: True Loan <tloan@phytec.com>
+Date: Fri, 13 Nov 2026 17:12:56 -0800
+Subject: [PATCH 3/6] phyFLEX-stm32mp2 M33 I2C Temp Sensor example:
+ stm32cubemp2 v1.3.2
+
+   The default I2C_TwoBoards_ComPolling example has the following behavior:
+
+   - uses I2C8 to communicate between two STM32MP257-EV1 boards.
+   - configures one board as master and the other as slave.
+   - waits for a USER2 button press before the master sends a predefined message.
+   - waits for another button press before the master receives a message back.
+   - compares the transmitted and received buffers, then blinks LED3 on success.
+
+   Here we are changing the example to read a P3T1755 temperature sensor located
+   on the phyFLEX-STM32MP257 Development Kit Carrier Board using I2C1 and print
+   the temperature over UART5 every three seconds (without flow control! access
+   at reference designator JP1):
+
+   - uses PI1 for I2C1 SDA and PG13 for I2C1 SCL.
+   - uses the sensor's 7-bit address 0x4F, with A0, A1 and A2 pulled high.
+   - reads two bytes from temperature register 0x00 using blocking HAL calls.
+   - converts the signed 12-bit reading to degrees Celsius.
+   - prints through UART5 on PG9 (TX), configured for 115200 baud, 8N1.
+   - toggles LED3 after a successful reading and prints a message on read failure.
+   - runs automatically without waiting for a button press.
+
+   Linux I2C1 must be disabled in the active device tree so it does not compete
+   with the Cortex-M33 for the peripheral. The updated M33-examples overlay
+   must be compiled, deployed to /boot/overlays/, and enabled at boot.
+
+Signed-off-by: True Loan <tloan@phytec.com>
+---
+ .../CM33/NonSecure/Inc/main.h                 |   6 +-
+ .../CM33/NonSecure/Src/main.c                 | 265 ++++++++----------
+ .../CM33/NonSecure/Src/stm32mp2xx_hal_msp.c   |  35 +--
+ 3 files changed, 141 insertions(+), 165 deletions(-)
+
+diff --git a/Projects/STM32MP257F-EV1/Examples/I2C/I2C_TwoBoards_ComPolling/CM33/NonSecure/Inc/main.h b/Projects/STM32MP257F-EV1/Examples/I2C/I2C_TwoBoards_ComPolling/CM33/NonSecure/Inc/main.h
+index 8f0aebd..68fb49e 100644
+--- a/Projects/STM32MP257F-EV1/Examples/I2C/I2C_TwoBoards_ComPolling/CM33/NonSecure/Inc/main.h
++++ b/Projects/STM32MP257F-EV1/Examples/I2C/I2C_TwoBoards_ComPolling/CM33/NonSecure/Inc/main.h
+@@ -52,7 +52,7 @@ void Error_Handler(void);
+ /* Private defines ------------------------------------------------------------*/
+ #define DEFAULT_IRQ_PRIO      1U
+ 
+-#define I2C_ADDRESS 0x30F
++#define I2C_ADDRESS (0x4FU << 1) /* P3T1755: A2/A1/A0 high */
+ /* ########################## Assert Selection ############################## */
+ /**
+   * @brief Uncomment the line below to expanse the "assert_param" macro in the 
+@@ -62,10 +62,6 @@ void Error_Handler(void);
+ 
+ /* USER CODE BEGIN Private defines */
+ 
+-/* Size of Transmission buffer */
+-#define TXBUFFERSIZE                      (COUNTOF(aTxBuffer) - 1)
+-/* Size of Reception buffer */
+-#define RXBUFFERSIZE                      TXBUFFERSIZE
+ /* USER CODE END Private defines */
+ 
+ #ifdef __cplusplus
+diff --git a/Projects/STM32MP257F-EV1/Examples/I2C/I2C_TwoBoards_ComPolling/CM33/NonSecure/Src/main.c b/Projects/STM32MP257F-EV1/Examples/I2C/I2C_TwoBoards_ComPolling/CM33/NonSecure/Src/main.c
+index c88c360..e6fdc46 100644
+--- a/Projects/STM32MP257F-EV1/Examples/I2C/I2C_TwoBoards_ComPolling/CM33/NonSecure/Src/main.c
++++ b/Projects/STM32MP257F-EV1/Examples/I2C/I2C_TwoBoards_ComPolling/CM33/NonSecure/Src/main.c
+@@ -22,6 +22,9 @@
+ /* Includes ------------------------------------------------------------------*/
+ #include "main.h"
+ #include "copro_sync.h"
++#include "res_mgr.h"
++#include "stm32mp2xx_ll_usart.h"
++#include <stdio.h>
+ 
+ /** @addtogroup STM32MP2xx_HAL_Examples
+   * @{
+@@ -36,9 +39,6 @@
+ #ifdef ICACHE_DCACHE_USE
+ #define ICACHE_DCACHE_ENABLE
+ #endif
+-/* Uncomment this line to use the board as master, if not it is used as slave */
+-#define MASTER_BOARD
+-#define I2C_ADDRESS        		0x30F
+ #define BUS_I2Cx_FREQUENCY   	0x2050606FU
+ 
+ /* Private variables ---------------------------------------------------------*/
+@@ -46,11 +46,6 @@
+ I2C_HandleTypeDef I2cHandle;
+ IPCC_HandleTypeDef   hipcc1;
+ 
+-/* Buffer used for transmission */
+-uint8_t aTxBuffer[] = " ****I2C_TwoBoards communication based on Polling****  ****I2C_TwoBoards communication based on Polling****  ****I2C_TwoBoards communication based on Polling**** ";
+-
+-/* Buffer used for reception */
+-uint8_t aRxBuffer[RXBUFFERSIZE];
+ 
+ #ifdef DEBUG
+ volatile uint8_t debug = 1;
+@@ -59,10 +54,11 @@ volatile uint8_t debug = 1;
+ /* Private function prototypes -----------------------------------------------*/
+ static void SystemClock_Config(void);
+ static void MX_GPIO_Init(void);
+-static void MX_I2C8_Init(void);
+-static void MX_I2C8_DeInit(void);
++static void MX_I2C1_Init(void);
++static void MX_I2C1_DeInit(void);
+ void HAL_I2C_MspPostInit(I2C_HandleTypeDef* hi2c);
+-static uint16_t Buffercmp(uint8_t *pBuffer1, uint8_t *pBuffer2, uint16_t BufferLength);
++static void UART5_Init(void);
++static void UART5_Print(const char *text);
+ static void MX_IPCC_Init(void);
+ #ifdef ICACHE_DCACHE_ENABLE
+ static void MX_ICACHE_Init(void);
+@@ -127,105 +123,32 @@ int main(void)
+ 
+   /* Initialize all configured peripherals */
+   MX_GPIO_Init();
+-  MX_I2C8_Init();
+-
+-#ifdef MASTER_BOARD
+-
+-  /* Configure User push-button */
+-  BSP_PB_Init(BUTTON_USER2, BUTTON_MODE_GPIO);
+-
+-  /* Infinite loop */
+-  /* Wait for User push-button press before starting the Communication */
+-  while (BSP_PB_GetState(BUTTON_USER2) != GPIO_PIN_SET)
+-  {
+-  }
+-
+-  /* Delay to avoid that possible signal rebound is taken as button release */
+-  HAL_Delay(50);
+-
+-  /* Wait for User push-button release before starting the Communication */
+-  while (BSP_PB_GetState(BUTTON_USER2) != GPIO_PIN_RESET)
+-  {
+-  }
+-
+-  /* The board sends the message and expects to receive it back */
+-
+-  /*##-2- Start the transmission process #####################################*/
+-  /* While the I2C in reception process, user can transmit data through
+-   "aTxBuffer" buffer */
+-  /* Timeout is set to 10S */
+-  while(HAL_I2C_Master_Transmit(&I2cHandle, (uint16_t)I2C_ADDRESS, (uint8_t*)aTxBuffer, TXBUFFERSIZE, 10000)!= HAL_OK)
+-  {
+-	/* Error_Handler() function is called when Timeout error occurs.
+-	   When Acknowledge failure occurs (Slave don't acknowledge its address)
+-	   Master restarts communication */
+-	if (HAL_I2C_GetError(&I2cHandle) != HAL_I2C_ERROR_AF)
+-	{
+-	  Error_Handler();
+-	}
+-  }
+-
+-  /* Wait for User push-button press before starting the Communication */
+-  while (BSP_PB_GetState(BUTTON_USER2) != GPIO_PIN_SET)
+-  {
+-  }
+-
++  MX_I2C1_Init();
+ 
+-  /* Delay to avoid that possible signal rebound is taken as button release */
+-  HAL_Delay(50);
++  UART5_Init();
++  HAL_Delay(100); /* Sensor power-up and initial conversion. */
+ 
+-  /* Wait for User push-button release before starting the Communication */
+-  while (BSP_PB_GetState(BUTTON_USER2) != GPIO_PIN_RESET)
+-  {
+-  }
+-
+-  /*##-3- Put I2C peripheral in reception process ############################*/
+-  /* Timeout is set to 10S */
+-  while(HAL_I2C_Master_Receive(&I2cHandle, (uint16_t)I2C_ADDRESS, (uint8_t *)aRxBuffer, RXBUFFERSIZE, 10000) != HAL_OK)
++  while (1)
+   {
+-    /* Error_Handler() function is called when Timeout error occurs.
+-       When Acknowledge failure occurs (Slave don't acknowledge it's address)
+-       Master restarts communication */
+-    if (HAL_I2C_GetError(&I2cHandle) != HAL_I2C_ERROR_AF)
++    uint8_t data[2];
++    char line[64];
++    if (HAL_I2C_Mem_Read(&I2cHandle, I2C_ADDRESS, 0x00,
++                        I2C_MEMADD_SIZE_8BIT, data, 2, 100) == HAL_OK)
+     {
+-      Error_Handler();
++      int32_t counts = (((uint16_t)data[0] << 8) | data[1]) >> 4;
++      if (counts & 0x800) counts -= 4096;
++      int32_t magnitude = counts < 0 ? -counts : counts;
++      snprintf(line, sizeof(line), "Temperature: %s%ld.%04ld C\r\n",
++               counts < 0 ? "-" : "", (long)(magnitude / 16),
++               (long)((magnitude % 16) * 625));
++      UART5_Print(line);
++      BSP_LED_Toggle(LED3);
+     }
+-  }
+-
+-#else
+-
+-  /* The board receives the message and sends it back */
+-
+-  /*##- Put I2C peripheral in reception process ###########################*/
+-  if(HAL_I2C_Slave_Receive(&I2cHandle, (uint8_t *)aRxBuffer, RXBUFFERSIZE, 10000) != HAL_OK)
+-  {
+-    /* Transfer error in reception process */
+-    Error_Handler();
+-  }
+-
+-  /*##- Start the transmission process #####################################*/
+-  /* While the I2C in reception process, user can transmit data through
+-     "aTxBuffer" buffer */
+-  if(HAL_I2C_Slave_Transmit(&I2cHandle, (uint8_t*)aTxBuffer, TXBUFFERSIZE, 10000)!= HAL_OK)
+-  {
+-    /* Transfer error in transmission process */
+-    Error_Handler();
+-  }
+-
+-#endif /* MASTER_BOARD */
+-
+-  /*##- Compare the sent and received buffers ##############################*/
+-  if(Buffercmp((uint8_t*)aTxBuffer,(uint8_t*)aRxBuffer,RXBUFFERSIZE))
+-  {
+-    /* Processing Error */
+-    Error_Handler();
+-  }
+-
+-  /* Infinite loop */
+-  while (1)
+-  {
+-	BSP_LED_Toggle(LED3);
+-    HAL_Delay(500);
++    else
++    {
++      UART5_Print("Temperature read failed\r\n");
++    }
++    HAL_Delay(3000);
+   }
+ 
+ }
+@@ -378,30 +301,34 @@ static void SystemClock_Config(void) {
+   * @retval None
+   */
+ 
+-static void MX_I2C8_Init(void)
++static void MX_I2C1_Init(void)
+ {
+ 
+-	if (RESMGR_STATUS_ACCESS_OK != ResMgr_Request(RESMGR_RESOURCE_RIFSC, STM32MP25_RIFSC_I2C8_ID))
++	if (RESMGR_STATUS_ACCESS_OK != ResMgr_Request(RESMGR_RESOURCE_RIFSC, STM32MP25_RIFSC_I2C1_ID))
+ 	{
+ 		Error_Handler();
+ 	}
+-	if (RESMGR_STATUS_ACCESS_OK != ResMgr_Request(RESMGR_RESOURCE_RIF_GPIOZ, RESMGR_GPIO_PIN(3)))
++	if (RESMGR_STATUS_ACCESS_OK != ResMgr_Request(RESMGR_RESOURCE_RIF_GPIOI, RESMGR_GPIO_PIN(1)))
+ 	{
+ 		Error_Handler();
+ 	}
+ 	/* Acquire GPIOZ4 using Resource manager */
+-	if (RESMGR_STATUS_ACCESS_OK != ResMgr_Request(RESMGR_RESOURCE_RIF_GPIOZ, RESMGR_GPIO_PIN(4)))
++	if (RESMGR_STATUS_ACCESS_OK != ResMgr_Request(RESMGR_RESOURCE_RIF_GPIOG, RESMGR_GPIO_PIN(13)))
+ 	{
+ 		Error_Handler();
+ 	}
+-		/**I2C8 GPIO Configuration
+-		PZ3      ------> I2C8_SDA
+-		PZ4      ------> I2C8_SCL
++		/**I2C1 GPIO Configuration
++		PI1      ------> I2C1_SDA
++		PG13      ------> I2C1_SCL
+ 		*/
+ 	/* Enable GPIOs power supplies */
+-	if (RESMGR_STATUS_ACCESS_OK == ResMgr_Request(RESMGR_RESOURCE_RIF_RCC, RESMGR_RCC_RESOURCE(101)))
++	if (RESMGR_STATUS_ACCESS_OK == ResMgr_Request(RESMGR_RESOURCE_RIF_RCC, RESMGR_RCC_RESOURCE(98)))
++	{
++		__HAL_RCC_GPIOI_CLK_ENABLE();
++	}
++	if (RESMGR_STATUS_ACCESS_OK == ResMgr_Request(RESMGR_RESOURCE_RIF_RCC, RESMGR_RCC_RESOURCE(96)))
+ 	{
+-		__HAL_RCC_GPIOZ_CLK_ENABLE();
++		__HAL_RCC_GPIOG_CLK_ENABLE();
+ 	}
+ 
+   /* USER CODE BEGIN I2C8_Init 0 */
+@@ -411,10 +338,10 @@ static void MX_I2C8_Init(void)
+   /* USER CODE BEGIN I2C8_Init 1 */
+ 
+   /* USER CODE END I2C8_Init 1 */
+-  I2cHandle.Instance = I2C8;
++  I2cHandle.Instance = I2C1;
+   I2cHandle.Init.Timing = BUS_I2Cx_FREQUENCY;
+-  I2cHandle.Init.OwnAddress1 = I2C_ADDRESS;
+-  I2cHandle.Init.AddressingMode = I2C_ADDRESSINGMODE_10BIT;
++  I2cHandle.Init.OwnAddress1 = 0;
++  I2cHandle.Init.AddressingMode = I2C_ADDRESSINGMODE_7BIT;
+   I2cHandle.Init.DualAddressMode = I2C_DUALADDRESS_DISABLE;
+   I2cHandle.Init.OwnAddress2 = 0;
+   I2cHandle.Init.OwnAddress2Masks = I2C_OA2_NOMASK;
+@@ -466,28 +393,6 @@ static void MX_GPIO_Init(void)
+ }
+ 
+ /* USER CODE BEGIN 4 */
+-/**
+-  * @brief  Compares two buffers.
+-  * @param  pBuffer1, pBuffer2: buffers to be compared.
+-  * @param  BufferLength: buffer's length
+-  * @retval 0  : pBuffer1 identical to pBuffer2
+-  *         >0 : pBuffer1 differs from pBuffer2
+-  */
+-static uint16_t Buffercmp(uint8_t *pBuffer1, uint8_t *pBuffer2, uint16_t BufferLength)
+-{
+-  while (BufferLength--)
+-  {
+-    if ((*pBuffer1) != *pBuffer2)
+-    {
+-      return BufferLength;
+-    }
+-    pBuffer1++;
+-    pBuffer2++;
+-  }
+-
+-  return 0;
+-}
+-
+ /* USER CODE END 4 */
+ 
+ /**
+@@ -495,18 +400,18 @@ static uint16_t Buffercmp(uint8_t *pBuffer1, uint8_t *pBuffer2, uint16_t BufferL
+   * @param 	None
+   * @retval None
+   */
+-static void MX_I2C8_DeInit(void)
++static void MX_I2C1_DeInit(void)
+ {
+ 	/* Deinitialize the I2C peripheral */
+ 	HAL_I2C_DeInit(&I2cHandle);
+ 	/* Release I2C8 using Resource manager */
+-	ResMgr_Release(RESMGR_RESOURCE_RIFSC, STM32MP25_RIFSC_I2C8_ID);
++	ResMgr_Release(RESMGR_RESOURCE_RIFSC, STM32MP25_RIFSC_I2C1_ID);
+ 
+ 	/* Release GPIOZ3 using Resource manager */
+-	ResMgr_Release(RESMGR_RESOURCE_RIF_GPIOZ, RESMGR_GPIO_PIN(3));
++	ResMgr_Release(RESMGR_RESOURCE_RIF_GPIOI, RESMGR_GPIO_PIN(1));
+ 
+ 	/* Release GPIOZ4 using Resource manager */
+-	ResMgr_Release(RESMGR_RESOURCE_RIF_GPIOZ, RESMGR_GPIO_PIN(4));
++	ResMgr_Release(RESMGR_RESOURCE_RIF_GPIOG, RESMGR_GPIO_PIN(13));
+ 
+ }
+ 
+@@ -537,7 +442,13 @@ static void MX_IPCC_Init(void)
+  */
+ void CoproSync_ShutdownCb(IPCC_HandleTypeDef * hipcc, uint32_t ChannelIndex, IPCC_CHANNELDirTypeDef ChannelDir)
+ {
+-	MX_I2C8_DeInit();
++    MX_I2C1_DeInit();
++    LL_USART_Disable(UART5);
++    __HAL_RCC_UART5_CLK_DISABLE();
++    HAL_GPIO_DeInit(GPIOG, GPIO_PIN_9 | GPIO_PIN_10);
++    ResMgr_Release(RESMGR_RESOURCE_RIF_GPIOG, RESMGR_GPIO_PIN(9));
++    ResMgr_Release(RESMGR_RESOURCE_RIF_GPIOG, RESMGR_GPIO_PIN(10));
++    ResMgr_Release(RESMGR_RESOURCE_RIFSC, STM32MP25_RIFSC_UART5_ID);
+ 
+ 	/* Deinitialize the LED3 */
+ 	BSP_LED_DeInit(LED3);
+@@ -690,3 +601,69 @@ void assert_failed(uint8_t *file, uint32_t line)
+   /* USER CODE END 6 */
+ }
+ #endif /* USE_FULL_ASSERT */
++
++/* Same UART5 pins and baud configuration as the verified USART example. */
++static void UART5_Init(void)
++{
++  /* Inspect these variables in the debugger if a request fails. */
++  static volatile ResMgr_Status_t uart_status;
++  static volatile ResMgr_Status_t pg9_status;
++  static volatile ResMgr_Status_t pg10_status;
++  static volatile ResMgr_Status_t clock_status;
++
++  uart_status = ResMgr_Request(
++      RESMGR_RESOURCE_RIFSC, STM32MP25_RIFSC_UART5_ID);
++  if (uart_status != RESMGR_STATUS_ACCESS_OK)
++    Error_Handler();
++
++  pg9_status = ResMgr_Request(
++      RESMGR_RESOURCE_RIF_GPIOG, RESMGR_GPIO_PIN(9));
++  if (pg9_status != RESMGR_STATUS_ACCESS_OK)
++    Error_Handler();
++
++  pg10_status = ResMgr_Request(
++      RESMGR_RESOURCE_RIF_GPIOG, RESMGR_GPIO_PIN(10));
++  if (pg10_status != RESMGR_STATUS_ACCESS_OK)
++    Error_Handler();
++
++  /* Match the working USART example: only enable the clock if permitted. */
++  clock_status = ResMgr_Request(
++      RESMGR_RESOURCE_RIF_RCC, RESMGR_RCC_RESOURCE(96));
++  if (clock_status == RESMGR_STATUS_ACCESS_OK)
++    __HAL_RCC_GPIOG_CLK_ENABLE();
++
++  GPIO_InitTypeDef gpio = {0};
++  gpio.Pin = GPIO_PIN_9 | GPIO_PIN_10;
++  gpio.Mode = GPIO_MODE_AF_PP;
++  gpio.Pull = GPIO_PULLUP;
++  gpio.Speed = GPIO_SPEED_FREQ_HIGH;
++  gpio.Alternate = GPIO_AF5_UART5;
++  HAL_GPIO_Init(GPIOG, &gpio);
++
++  __HAL_RCC_UART5_CLK_ENABLE();
++  LL_USART_Disable(UART5);
++  LL_USART_SetTransferDirection(UART5, LL_USART_DIRECTION_TX_RX);
++  LL_USART_ConfigCharacter(UART5, LL_USART_DATAWIDTH_8B,
++                           LL_USART_PARITY_NONE, LL_USART_STOPBITS_1);
++  LL_USART_SetHWFlowCtrl(UART5, LL_USART_HWCONTROL_NONE);
++  LL_USART_SetOverSampling(UART5, LL_USART_OVERSAMPLING_8);
++  LL_USART_SetBaudRate(UART5, HAL_RCCEx_GetPeriphCLKFreq(RCC_PERIPHCLK_UART3_5),
++                      LL_USART_PRESCALER_DIV1, LL_USART_OVERSAMPLING_8, 115200);
++  NVIC_DisableIRQ(UART5_IRQn);
++  LL_USART_DisableIT_RXNE(UART5);
++  LL_USART_DisableIT_ERROR(UART5);
++  LL_USART_Enable(UART5);
++}
++
++static void UART5_Print(const char *text)
++{
++  uint32_t start = HAL_GetTick();
++  while (*text)
++  {
++    while (!LL_USART_IsActiveFlag_TXE(UART5))
++      if (HAL_GetTick() - start >= 100U) Error_Handler();
++    LL_USART_TransmitData8(UART5, (uint8_t)*text++);
++  }
++  while (!LL_USART_IsActiveFlag_TC(UART5))
++    if (HAL_GetTick() - start >= 100U) Error_Handler();
++}
+diff --git a/Projects/STM32MP257F-EV1/Examples/I2C/I2C_TwoBoards_ComPolling/CM33/NonSecure/Src/stm32mp2xx_hal_msp.c b/Projects/STM32MP257F-EV1/Examples/I2C/I2C_TwoBoards_ComPolling/CM33/NonSecure/Src/stm32mp2xx_hal_msp.c
+index c5b8f69..68a1ac3 100644
+--- a/Projects/STM32MP257F-EV1/Examples/I2C/I2C_TwoBoards_ComPolling/CM33/NonSecure/Src/stm32mp2xx_hal_msp.c
++++ b/Projects/STM32MP257F-EV1/Examples/I2C/I2C_TwoBoards_ComPolling/CM33/NonSecure/Src/stm32mp2xx_hal_msp.c
+@@ -41,15 +41,15 @@ void HAL_MspInit(void)
+ 
+ void HAL_I2C_MspInit(I2C_HandleTypeDef* hi2c)
+ {
+-  if(I2C8 == hi2c->Instance)
++  if(I2C1 == hi2c->Instance)
+   {
+     /* USER CODE BEGIN I2C8_MspInit 0 */
+     /* USER CODE END I2C8_MspInit 0 */
+ 	/* Acquire I2C8 using Resource manager */
+ 
+-	__HAL_RCC_I2C8_CLK_ENABLE();
+-	__HAL_RCC_I2C8_FORCE_RESET();
+-	__HAL_RCC_I2C8_RELEASE_RESET();
++	__HAL_RCC_I2C1_CLK_ENABLE();
++	__HAL_RCC_I2C1_FORCE_RESET();
++	__HAL_RCC_I2C1_RELEASE_RESET();
+ 
+     /* USER CODE BEGIN I2C8_MspInit 1 */
+     /* USER CODE END I2C8_MspInit 1 */
+@@ -59,21 +59,23 @@ void HAL_I2C_MspInit(I2C_HandleTypeDef* hi2c)
+ 
+ void HAL_I2C_MspPostInit(I2C_HandleTypeDef* hi2c)
+ {
+-	GPIO_InitTypeDef GPIO_InitStruct;
++	GPIO_InitTypeDef GPIO_InitStruct = {0};
+ 
+ 	/* USER CODE BEGIN I2C_MspPostInit 0 */
+ 
+ 	/* USER CODE END I2C_MspPostInit 0 */
+-	if(I2C8 == hi2c->Instance)
++	if(I2C1 == hi2c->Instance)
+ 	{
+ 		/* Acquire GPIOZ3 using Resource manager */
+ 
+-	    GPIO_InitStruct.Pin = GPIO_PIN_3 | GPIO_PIN_4;
++	    GPIO_InitStruct.Pin = GPIO_PIN_1;
+ 	    GPIO_InitStruct.Mode = GPIO_MODE_AF_OD;
+ 	    GPIO_InitStruct.Pull = GPIO_NOPULL;
+ 	    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+-	    GPIO_InitStruct.Alternate = GPIO_AF8_I2C8;
+-	    HAL_GPIO_Init(GPIOZ, &GPIO_InitStruct);
++	    GPIO_InitStruct.Alternate = GPIO_AF9_I2C1;
++	    HAL_GPIO_Init(GPIOI, &GPIO_InitStruct);
++	    GPIO_InitStruct.Pin = GPIO_PIN_13;
++	    HAL_GPIO_Init(GPIOG, &GPIO_InitStruct);
+ 	}
+ }
+ 
+@@ -82,19 +84,20 @@ void HAL_I2C_MspDeInit(I2C_HandleTypeDef* hi2c)
+   /* USER CODE BEGIN I2C8_MspDeInit 0 */
+ 
+   /* USER CODE END I2C8_MspDeInit 0 */
+-  if(I2C8 == hi2c->Instance)
++  if(I2C1 == hi2c->Instance)
+   {
+ 	/* Peripheral clock disable */
+-  __HAL_RCC_I2C8_CLK_DISABLE();
++  __HAL_RCC_I2C1_CLK_DISABLE();
+ 
+-	/**I2C8 GPIO Configuration
+-	PZ3      ------> I2C8_SDA
+-	PZ4      ------> I2C8_SCL
++	/**I2C1 GPIO Configuration
++	PI1      ------> I2C1_SDA
++	PG13      ------> I2C1_SCL
+ 	*/
+-	HAL_GPIO_DeInit(GPIOB, GPIO_PIN_4 | GPIO_PIN_5);
++	HAL_GPIO_DeInit(GPIOI, GPIO_PIN_1);
++	HAL_GPIO_DeInit(GPIOG, GPIO_PIN_13);
+ 
+ 	/* I2C8 interrupt DeInit */
+-	HAL_NVIC_DisableIRQ(I2C8_IRQn);
++	HAL_NVIC_DisableIRQ(I2C1_IRQn);
+ 
+ 	/* USER CODE BEGIN I2C8_MspDeInit 1 */
+ 	/* USER CODE END I2C8_MspDeInit 1 */
+-- 
+2.56.1.windows.1
+

@@ -1,0 +1,111 @@
+From 7d2b7ace30b3817d47370278bfe5e5cd19a10f79 Mon Sep 17 00:00:00 2001
+From: True Loan <tloan@phytec.com>
+Date: Thu, 19 Nov 2026 10:32:20 -0800
+Subject: [PATCH 6/6] phyFLEX-stm32mp2 M33 OpenAMP TTY echo example:
+ stm32cubemp2 v1.3.2
+
+   The default OpenAMP_TTY_echo example has the following behavior:
+
+   - creates two virtual UART channels between Linux and the Cortex-M33.
+   - exposes these channels as /dev/ttyRPMSG0 and /dev/ttyRPMSG1 in Linux.
+   - prints received messages on the M33 console.
+   - sends each message back to Linux on the same channel.
+
+   The example largely works as-is on the phyFLEX-STM32MP257 Development Kit.
+   Here we are making the M33's replies easier to identify and fixing the
+   example's compatibility issue with newer CMake versions:
+
+   - added a "M33 Responds: " prefix to replies to Linux.
+   - prints only the original received text through UART5.
+   - bounds console printing by the received message length rather than
+     assuming the RPMsg data is null-terminated.
+   - reserves space for the reply prefix within the RPMsg payload limit.
+
+   The bundled libmetal build script requests CMake 3.0.2 compatibility,
+   which CMake 4.x no longer supports (STM32CubeIDE 2.2.0 comes with
+   CMake 4.3.1. so this required a fix). Added
+   -DCMAKE_POLICY_VERSION_MINIMUM=3.5 to the pre-build CMake command so
+   the library configures with newer CMake without modifying its source.
+
+Signed-off-by: True Loan <tloan@phytec.com>
+---
+ .../CM33/NonSecure/Core/Src/main.c            | 22 +++++++++++++------
+ .../STM32CubeIDE/CM33/NonSecure/.cproject     |  4 ++--
+ 2 files changed, 17 insertions(+), 9 deletions(-)
+
+diff --git a/Projects/STM32MP257F-EV1/Applications/OpenAMP/OpenAMP_TTY_echo/CM33/NonSecure/Core/Src/main.c b/Projects/STM32MP257F-EV1/Applications/OpenAMP/OpenAMP_TTY_echo/CM33/NonSecure/Core/Src/main.c
+index 0c03caa..4d09c8d 100644
+--- a/Projects/STM32MP257F-EV1/Applications/OpenAMP/OpenAMP_TTY_echo/CM33/NonSecure/Core/Src/main.c
++++ b/Projects/STM32MP257F-EV1/Applications/OpenAMP/OpenAMP_TTY_echo/CM33/NonSecure/Core/Src/main.c
+@@ -107,7 +107,7 @@ int main(void)
+   BSP_LED_Init(LED3);
+   BSP_LED_On(LED3);
+ 
+-  loc_printf ("\r\n Starting OpenAMP application (%s: %s) \r\n", __DATE__, __TIME__);
++  loc_printf ("\r\nStarting OpenAMP application (%s: %s) \r\n", __DATE__, __TIME__);
+ 
+   /* IPCC initialisation */
+   MX_IPCC_Init();
+@@ -211,23 +211,31 @@ static void MX_IPCC_Init(void)
+ 
+ void VIRT_UART0_RxCpltCallback(VIRT_UART_HandleTypeDef *huart)
+ {
++    static const char prefix[] = "M33 Responds: ";
++    const uint16_t maxInputSize = RPMSG_BUFFER_SIZE - 16U - (sizeof(prefix) - 1U);
+ 
+-    loc_printf("Msg received on VIRTUAL UART0 channel:  %s \n\r", (char *) huart->pRxBuffPtr);
++    loc_printf("%.*s\r", (int)huart->RxXferSize, (char *)huart->pRxBuffPtr);
+ 
+     /* copy received msg in a variable to sent it back to master processor in main infinite loop*/
+-    VirtUart0ChannelRxSize = huart->RxXferSize < MAX_BUFFER_SIZE? huart->RxXferSize : MAX_BUFFER_SIZE-1;
+-    memcpy(VirtUart0ChannelBuffRx, huart->pRxBuffPtr, VirtUart0ChannelRxSize);
++    VirtUart0ChannelRxSize = huart->RxXferSize < maxInputSize ? huart->RxXferSize : maxInputSize;
++    memcpy(VirtUart0ChannelBuffRx, prefix, sizeof(prefix) - 1U);
++    memcpy(VirtUart0ChannelBuffRx + sizeof(prefix) - 1U, huart->pRxBuffPtr, VirtUart0ChannelRxSize);
++    VirtUart0ChannelRxSize += sizeof(prefix) - 1U;
+     VirtUart0RxMsg = SET;
+ }
+ 
+ void VIRT_UART1_RxCpltCallback(VIRT_UART_HandleTypeDef *huart)
+ {
++    static const char prefix[] = "M33 Responds: ";
++    const uint16_t maxInputSize = RPMSG_BUFFER_SIZE - 16U - (sizeof(prefix) - 1U);
+ 
+-    loc_printf("Msg received on VIRTUAL UART1 channel:  %s \n\r", (char *) huart->pRxBuffPtr);
++    loc_printf("%.*s\r", (int)huart->RxXferSize, (char *)huart->pRxBuffPtr);
+ 
+     /* copy received msg in a variable to sent it back to master processor in main infinite loop*/
+-    VirtUart1ChannelRxSize = huart->RxXferSize < MAX_BUFFER_SIZE? huart->RxXferSize : MAX_BUFFER_SIZE-1;
+-    memcpy(VirtUart1ChannelBuffRx, huart->pRxBuffPtr, VirtUart1ChannelRxSize);
++    VirtUart1ChannelRxSize = huart->RxXferSize < maxInputSize ? huart->RxXferSize : maxInputSize;
++    memcpy(VirtUart1ChannelBuffRx, prefix, sizeof(prefix) - 1U);
++    memcpy(VirtUart1ChannelBuffRx + sizeof(prefix) - 1U, huart->pRxBuffPtr, VirtUart1ChannelRxSize);
++    VirtUart1ChannelRxSize += sizeof(prefix) - 1U;
+     VirtUart1RxMsg = SET;
+ }
+ 
+diff --git a/Projects/STM32MP257F-EV1/Applications/OpenAMP/OpenAMP_TTY_echo/STM32CubeIDE/CM33/NonSecure/.cproject b/Projects/STM32MP257F-EV1/Applications/OpenAMP/OpenAMP_TTY_echo/STM32CubeIDE/CM33/NonSecure/.cproject
+index b52e457..d99b44b 100644
+--- a/Projects/STM32MP257F-EV1/Applications/OpenAMP/OpenAMP_TTY_echo/STM32CubeIDE/CM33/NonSecure/.cproject
++++ b/Projects/STM32MP257F-EV1/Applications/OpenAMP/OpenAMP_TTY_echo/STM32CubeIDE/CM33/NonSecure/.cproject
+@@ -14,7 +14,7 @@
+ 				</extensions>
+ 			</storageModule>
+ 			<storageModule moduleId="cdtBuildSystem" version="4.0.0">
+-				<configuration artifactExtension="elf" artifactName="${ProjName}" buildArtefactType="org.eclipse.cdt.build.core.buildArtefactType.exe" buildProperties="org.eclipse.cdt.build.core.buildArtefactType=org.eclipse.cdt.build.core.buildArtefactType.exe,org.eclipse.cdt.build.core.buildType=org.eclipse.cdt.build.core.buildType.debug" cleanCommand="rm -rf" description="" id="com.st.stm32cube.ide.mcu.gnu.managedbuild.config.exe.debug.1954796800" name="CA35TDCID_m33_ns" parent="com.st.stm32cube.ide.mcu.gnu.managedbuild.config.exe.debug" postannouncebuildStep="" postbuildStep="arm-none-eabi-objcopy -S ${BuildArtifactFileBaseName}.elf ${BuildArtifactFileBaseName}_stripped.elf" preannouncebuildStep="" prebuildStep="cmake -S ../../../../../../../../../Middlewares/Third_Party/OpenAMP/libmetal/ -B libmetal  -G&quot;Unix Makefiles&quot; -DCMAKE_TOOLCHAIN_FILE=cmake/platforms/stm32mp-generic-gcc.cmake">
++				<configuration artifactExtension="elf" artifactName="${ProjName}" buildArtefactType="org.eclipse.cdt.build.core.buildArtefactType.exe" buildProperties="org.eclipse.cdt.build.core.buildArtefactType=org.eclipse.cdt.build.core.buildArtefactType.exe,org.eclipse.cdt.build.core.buildType=org.eclipse.cdt.build.core.buildType.debug" cleanCommand="rm -rf" description="" id="com.st.stm32cube.ide.mcu.gnu.managedbuild.config.exe.debug.1954796800" name="CA35TDCID_m33_ns" parent="com.st.stm32cube.ide.mcu.gnu.managedbuild.config.exe.debug" postannouncebuildStep="" postbuildStep="arm-none-eabi-objcopy -S ${BuildArtifactFileBaseName}.elf ${BuildArtifactFileBaseName}_stripped.elf" preannouncebuildStep="" prebuildStep="cmake -S ../../../../../../../../../Middlewares/Third_Party/OpenAMP/libmetal/ -B libmetal  -G&quot;Unix Makefiles&quot; -DCMAKE_TOOLCHAIN_FILE=cmake/platforms/stm32mp-generic-gcc.cmake -DCMAKE_POLICY_VERSION_MINIMUM=3.5">
+ 					<folderInfo id="com.st.stm32cube.ide.mcu.gnu.managedbuild.config.exe.debug.1954796800." name="/" resourcePath="">
+ 						<toolChain id="com.st.stm32cube.ide.mcu.gnu.managedbuild.toolchain.exe.debug.1902452187" name="MCU ARM GCC" superClass="com.st.stm32cube.ide.mcu.gnu.managedbuild.toolchain.exe.debug">
+ 							<option id="com.st.stm32cube.ide.mcu.gnu.managedbuild.option.target_mcu.91417766" name="MCU" superClass="com.st.stm32cube.ide.mcu.gnu.managedbuild.option.target_mcu" useByScannerDiscovery="true" value="STM32MP257FAIx" valueType="string"/>
+@@ -114,7 +114,7 @@
+ 				</extensions>
+ 			</storageModule>
+ 			<storageModule moduleId="cdtBuildSystem" version="4.0.0">
+-				<configuration artifactExtension="elf" artifactName="${ProjName}" buildArtefactType="org.eclipse.cdt.build.core.buildArtefactType.exe" buildProperties="org.eclipse.cdt.build.core.buildArtefactType=org.eclipse.cdt.build.core.buildArtefactType.exe,org.eclipse.cdt.build.core.buildType=org.eclipse.cdt.build.core.buildType.debug" cleanCommand="rm -rf" description="" id="com.st.stm32cube.ide.mcu.gnu.managedbuild.config.exe.debug.1954796800.1953744303.84190311" name="CA35TDCID_m33_ns_sign" parent="com.st.stm32cube.ide.mcu.gnu.managedbuild.config.exe.debug" postbuildStep="arm-none-eabi-objcopy -S ${BuildArtifactFileBaseName}.elf ${BuildArtifactFileBaseName}_stripped.elf; python ../../../../../../../../../Utilities/optee_os/scripts/sign_rproc_fw.py --in ${BuildArtifactFileBaseName}_stripped.elf --out ${BuildArtifactFileBaseName}_sign.bin --key ../../../../../../../../../Utilities/optee_os/keys/default.pem --plat-tlv BOOTADDR 0x80100000" prebuildStep="cmake -S ../../../../../../../../../Middlewares/Third_Party/OpenAMP/libmetal/ -B libmetal  -G&quot;Unix Makefiles&quot; -DCMAKE_TOOLCHAIN_FILE=cmake/platforms/stm32mp-generic-gcc.cmake">
++				<configuration artifactExtension="elf" artifactName="${ProjName}" buildArtefactType="org.eclipse.cdt.build.core.buildArtefactType.exe" buildProperties="org.eclipse.cdt.build.core.buildArtefactType=org.eclipse.cdt.build.core.buildArtefactType.exe,org.eclipse.cdt.build.core.buildType=org.eclipse.cdt.build.core.buildType.debug" cleanCommand="rm -rf" description="" id="com.st.stm32cube.ide.mcu.gnu.managedbuild.config.exe.debug.1954796800.1953744303.84190311" name="CA35TDCID_m33_ns_sign" parent="com.st.stm32cube.ide.mcu.gnu.managedbuild.config.exe.debug" postbuildStep="arm-none-eabi-objcopy -S ${BuildArtifactFileBaseName}.elf ${BuildArtifactFileBaseName}_stripped.elf; python ../../../../../../../../../Utilities/optee_os/scripts/sign_rproc_fw.py --in ${BuildArtifactFileBaseName}_stripped.elf --out ${BuildArtifactFileBaseName}_sign.bin --key ../../../../../../../../../Utilities/optee_os/keys/default.pem --plat-tlv BOOTADDR 0x80100000" prebuildStep="cmake -S ../../../../../../../../../Middlewares/Third_Party/OpenAMP/libmetal/ -B libmetal  -G&quot;Unix Makefiles&quot; -DCMAKE_TOOLCHAIN_FILE=cmake/platforms/stm32mp-generic-gcc.cmake -DCMAKE_POLICY_VERSION_MINIMUM=3.5">
+ 					<folderInfo id="com.st.stm32cube.ide.mcu.gnu.managedbuild.config.exe.debug.1954796800.1953744303.84190311." name="/" resourcePath="">
+ 						<toolChain id="com.st.stm32cube.ide.mcu.gnu.managedbuild.toolchain.exe.debug.1535133367" name="MCU ARM GCC" superClass="com.st.stm32cube.ide.mcu.gnu.managedbuild.toolchain.exe.debug">
+ 							<option id="com.st.stm32cube.ide.mcu.gnu.managedbuild.option.target_mcu.91417766" name="MCU" superClass="com.st.stm32cube.ide.mcu.gnu.managedbuild.option.target_mcu" useByScannerDiscovery="true" value="STM32MP257FAIx" valueType="string"/>
+-- 
+2.56.1.windows.1
+

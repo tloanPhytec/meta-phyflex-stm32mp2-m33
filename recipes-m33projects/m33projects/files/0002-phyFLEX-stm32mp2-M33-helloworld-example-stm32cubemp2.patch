@@ -1,0 +1,244 @@
+From fd676e1e5d1cf4164b8439de327f2d5a49b91a67 Mon Sep 17 00:00:00 2001
+From: True Loan <tloan@phytec.com>
+Date: Fri, 13 Nov 2026 16:52:33 -0800
+Subject: [PATCH 2/6] phyFLEX-stm32mp2 M33 helloworld example: stm32cubemp2
+ v1.3.2
+
+   The default USART_Communication_Rx_IT example has the following behavior:
+
+   - triggers an interrupt whenever serial data is input on UART_RX.
+   - the USART interrupt handler toggles a LED ON if the serial data matches a 's' or 'S'.
+   - a different interrupt fires whenever the User Button is pressed
+   - The Userbutton interrupt handler turns the LED OFF
+
+   Here we are changing the example to OUTPUT serial instead in a loop (and the Userbutton
+   interrupt handler starts/stops it), since most people expect something like a HelloWorld
+   to start.
+
+Signed-off-by: True Loan <tloan@phytec.com>
+---
+ .../CM33/NonSecure/Inc/main.h                 | 18 ++---
+ .../CM33/NonSecure/Src/main.c                 | 67 +++++++++++++++----
+ .../CM33/NonSecure/Src/stm32mp2xx_it.c        |  2 +
+ 3 files changed, 65 insertions(+), 22 deletions(-)
+
+diff --git a/Projects/STM32MP257F-EV1/Examples_LL/USART/USART_Communication_Rx_IT/CM33/NonSecure/Inc/main.h b/Projects/STM32MP257F-EV1/Examples_LL/USART/USART_Communication_Rx_IT/CM33/NonSecure/Inc/main.h
+index e579cd7..98dd660 100644
+--- a/Projects/STM32MP257F-EV1/Examples_LL/USART/USART_Communication_Rx_IT/CM33/NonSecure/Inc/main.h
++++ b/Projects/STM32MP257F-EV1/Examples_LL/USART/USART_Communication_Rx_IT/CM33/NonSecure/Inc/main.h
+@@ -45,9 +45,9 @@
+   * @brief LED1
+   */
+ 
+-#define LED3_PIN                           		LL_GPIO_PIN_6
+-#define LED3_GPIO_PORT                     		GPIOJ
+-#define LED3_GPIO_CLK_ENABLE()             		LL_RCC_GPIOJ_EnableClock()
++#define LED3_PIN                           		LL_GPIO_PIN_5
++#define LED3_GPIO_PORT                     		GPIOH
++#define LED3_GPIO_CLK_ENABLE()             		LL_RCC_GPIOH_EnableClock()
+ 
+ /**
+   * @brief Toggle periods for various blinking modes
+@@ -61,14 +61,14 @@
+   * @brief Key push-button
+   */
+ 
+-#define USER2_BUTTON_PIN                        LL_GPIO_PIN_8
+-#define USER2_BUTTON_GPIO_PORT                  GPIOG
+-#define USER2_BUTTON_GPIO_CLK_ENABLE()			LL_RCC_GPIOG_EnableClock()
+-#define USER2_BUTTON_EXTI_LINE                  LL_EXTI2_LINE_8
+-#define USER2_BUTTON_EXTI_IRQn                  EXTI2_8_IRQn
++#define USER2_BUTTON_PIN                        LL_GPIO_PIN_11
++#define USER2_BUTTON_GPIO_PORT                  GPIOF
++#define USER2_BUTTON_GPIO_CLK_ENABLE()			LL_RCC_GPIOF_EnableClock()
++#define USER2_BUTTON_EXTI_LINE                  LL_EXTI2_LINE_11
++#define USER2_BUTTON_EXTI_IRQn                  EXTI2_11_IRQn
+ #define USER2_BUTTON_EXTI_LINE_ENABLE()         LL_C2_EXTI_EnableIT_0_31(EXTI2, USER2_BUTTON_EXTI_LINE)
+ #define USER2_BUTTON_EXTI_FALLING_TRIG_ENABLE() LL_EXTI_EnableFallingTrig_0_31(EXTI2, USER2_BUTTON_EXTI_LINE)
+-#define USER2_BUTTON_IRQHANDLER                 EXTI2_8_IRQHandler
++#define USER2_BUTTON_IRQHANDLER                 EXTI2_11_IRQHandler
+ 
+ /* USER CODE END EC */
+ 
+diff --git a/Projects/STM32MP257F-EV1/Examples_LL/USART/USART_Communication_Rx_IT/CM33/NonSecure/Src/main.c b/Projects/STM32MP257F-EV1/Examples_LL/USART/USART_Communication_Rx_IT/CM33/NonSecure/Src/main.c
+index e02dc09..4545d9f 100644
+--- a/Projects/STM32MP257F-EV1/Examples_LL/USART/USART_Communication_Rx_IT/CM33/NonSecure/Src/main.c
++++ b/Projects/STM32MP257F-EV1/Examples_LL/USART/USART_Communication_Rx_IT/CM33/NonSecure/Src/main.c
+@@ -57,6 +57,7 @@ static __IO uint8_t KeyPressed = 1;
+ #ifdef DEBUG
+ volatile int debug = 1;
+ #endif
++static volatile uint8_t printing = 1U;
+ /* handler declaration */
+ IPCC_HandleTypeDef hipcc1;
+ /* USER CODE BEGIN PV */
+@@ -107,6 +108,7 @@ int main(void)
+        - Set NVIC Group Priority to 4
+        - Low Level Initialization
+      */
++  HAL_Init();
+   /* USER CODE END 1 */
+ 
+   /* MCU Configuration--------------------------------------------------------*/
+@@ -154,12 +156,34 @@ int main(void)
+   MX_USART_Init();
+ 
+   /* USER CODE BEGIN 2 */
++  static const uint8_t message[] = "Hello World\r\n";
++
++  // disable the default USART RX interrupt behavior
++  NVIC_DisableIRQ(UART5_IRQn);
++  LL_USART_DisableIT_RXNE(UART5);
++  LL_USART_DisableIT_ERROR(UART5);
++
++  uint32_t last = HAL_GetTick();
+ 
+   /* Infinite loop */
+   while (1)
+   {
+     /* USER CODE END WHILE */
+ 
++	  uint32_t now = HAL_GetTick();
++	  if ((uint32_t)(now - last) >= 3000U && printing)
++	  {
++		  last = now;
++		  LED_On();
++		  for (uint32_t i = 0U; i < (sizeof(message) - 1U); ++i)
++		  {
++			  /* Wait until UART5 can accept another byte. */
++			  while (!LL_USART_IsActiveFlag_TXE(UART5)){}
++			  LL_USART_TransmitData8(UART5, message[i]);
++		  }
++		  /* Wait for the last byte to finish transmitting. */
++		  while (!LL_USART_IsActiveFlag_TC(UART5)){}
++	  }
+     /* USER CODE BEGIN 3 */
+   }
+   /* USER CODE END 3 */
+@@ -331,13 +355,13 @@ static void MX_GPIO_Init(void)
+ void LED_Init(void)
+ {
+   /* Enable the LED3 Clock */
+-  if (RESMGR_STATUS_ACCESS_OK == ResMgr_Request(RESMGR_RESOURCE_RIF_RCC, RESMGR_RCC_RESOURCE(99)))
++  if (RESMGR_STATUS_ACCESS_OK == ResMgr_Request(RESMGR_RESOURCE_RIF_RCC, RESMGR_RCC_RESOURCE(97)))
+   {
+ 	/* Enable GPIO Clock (to be able to program the configuration registers) */
+ 	  LED3_GPIO_CLK_ENABLE();
+   }
+   /* Acquire GPIOJ6 using Resource manager */
+-  if (RESMGR_STATUS_ACCESS_OK != ResMgr_Request(RESMGR_RESOURCE_RIF_GPIOJ, RESMGR_GPIO_PIN(6)))
++  if (RESMGR_STATUS_ACCESS_OK != ResMgr_Request(RESMGR_RESOURCE_RIF_GPIOH, RESMGR_GPIO_PIN(5)))
+   {
+     Error_Handler();
+   }
+@@ -354,7 +378,7 @@ void LED_Init(void)
+ void LED_DeInit(void)
+ {
+   /* Release GPIOJ6 using Resource manager */
+-  (void) ResMgr_Release(RESMGR_RESOURCE_RIF_GPIOJ, RESMGR_GPIO_PIN(6));
++  (void) ResMgr_Release(RESMGR_RESOURCE_RIF_GPIOH, RESMGR_GPIO_PIN(5));
+ }
+ 
+ /**
+@@ -378,13 +402,13 @@ void UserButton_Init()
+   LL_EXTI_InitTypeDef exti_initstruct;
+ 
+   /* Enable GPIOG clock */
+-  if (RESMGR_STATUS_ACCESS_OK == ResMgr_Request(RESMGR_RESOURCE_RIF_RCC, RESMGR_RCC_RESOURCE(96)))
++  if (RESMGR_STATUS_ACCESS_OK == ResMgr_Request(RESMGR_RESOURCE_RIF_RCC, RESMGR_RCC_RESOURCE(95)))
+   {
+ 	/* Enable GPIO Clock (to be able to program the configuration registers) */
+ 	USER2_BUTTON_GPIO_CLK_ENABLE();
+   }
+   /* Acquire GPIOG8 using Resource manager */
+-  if (RESMGR_STATUS_ACCESS_OK != ResMgr_Request(RESMGR_RESOURCE_RIF_GPIOG, RESMGR_GPIO_PIN(8)))
++  if (RESMGR_STATUS_ACCESS_OK != ResMgr_Request(RESMGR_RESOURCE_RIF_GPIOF, RESMGR_GPIO_PIN(11)))
+   {
+     Error_Handler();
+   }
+@@ -408,7 +432,7 @@ void UserButton_Init()
+   LL_EXTI_Init(EXTI2, &exti_initstruct);
+ 
+   /* -2- Connect External Line to the GPIO*/
+-  LL_EXTI_SetEXTISource(EXTI2, LL_EXTI_EXTICR_PORTG, LL_EXTI_EXTI_LINE8);
++  LL_EXTI_SetEXTISource(EXTI2, LL_EXTI_EXTICR_PORTF, LL_EXTI_EXTI_LINE11);
+ 
+   /*-4- Configure NVIC for EXTI15_10_IRQn */
+   NVIC_EnableIRQ(USER2_BUTTON_EXTI_IRQn);
+@@ -422,7 +446,7 @@ void UserButton_Init()
+ void UserButton_DeInit(void)
+ {
+   /* Release GPIOG8 using Resource manager */
+-  (void) ResMgr_Release(RESMGR_RESOURCE_RIF_GPIOG, RESMGR_GPIO_PIN(8));
++  (void) ResMgr_Release(RESMGR_RESOURCE_RIF_GPIOF, RESMGR_GPIO_PIN(11));
+ 
+   /* Disable NVIC for EXTI15_10_IRQn */
+   NVIC_DisableIRQ(USER2_BUTTON_EXTI_IRQn);
+@@ -484,8 +508,8 @@ void MX_USART_Init(void)
+   /* (2) NVIC Configuration for USART interrupts */
+   /*  - Set priority for UART5_IRQn */
+   /*  - Enable UART5_IRQn */
+-  NVIC_SetPriority(UART5_IRQn, 0);
+-  NVIC_EnableIRQ(UART5_IRQn);
++  //NVIC_SetPriority(UART5_IRQn, 0);
++  //NVIC_EnableIRQ(UART5_IRQn);
+ 
+   /* (3) Enable USART peripheral clock and clock source ***********************/
+   LL_RCC_UART5_EnableClock();
+@@ -528,8 +552,8 @@ void MX_USART_Init(void)
+   }
+ 
+   /* Enable RXNE and Error interrupts */
+-  LL_USART_EnableIT_RXNE(UART5);
+-  LL_USART_EnableIT_ERROR(UART5);
++  //LL_USART_EnableIT_RXNE(UART5);
++  //LL_USART_EnableIT_ERROR(UART5);
+ }
+ 
+ /**
+@@ -732,10 +756,27 @@ void Error_Handler(void)
+   */
+ void UserButton_Callback(void)
+ {
+-  /* Turn LED3 Off on User push-button press (allow to restart sequence) */
+-  LL_GPIO_ResetOutputPin(LED3_GPIO_PORT, LED3_PIN);
++    static uint32_t last_press = 0U;
++
++    uint32_t now = HAL_GetTick();
++
++    if ((uint32_t)(now - last_press) < 250U)
++    {
++        return;
++    }
++
++    last_press = now;
++
++    if (printing) {
++        printing = 0;
++        LL_GPIO_ResetOutputPin(LED3_GPIO_PORT, LED3_PIN);
++    } else {
++        printing = 1;
++        LED_On();
++    }
+ }
+ 
++
+ /**
+   * @brief  Function called from USART IRQ Handler when RXNE flag is set
+   *         Function is in charge of reading character received on USART RX line.
+diff --git a/Projects/STM32MP257F-EV1/Examples_LL/USART/USART_Communication_Rx_IT/CM33/NonSecure/Src/stm32mp2xx_it.c b/Projects/STM32MP257F-EV1/Examples_LL/USART/USART_Communication_Rx_IT/CM33/NonSecure/Src/stm32mp2xx_it.c
+index 26ca25e..217ad06 100644
+--- a/Projects/STM32MP257F-EV1/Examples_LL/USART/USART_Communication_Rx_IT/CM33/NonSecure/Src/stm32mp2xx_it.c
++++ b/Projects/STM32MP257F-EV1/Examples_LL/USART/USART_Communication_Rx_IT/CM33/NonSecure/Src/stm32mp2xx_it.c
+@@ -194,6 +194,8 @@ void PendSV_Handler(void)
+ */
+ void SysTick_Handler(void)
+ {
++  HAL_IncTick();
++  HAL_SYSTICK_IRQHandler();
+   /* USER CODE BEGIN SysTick_IRQn 0 */
+ 
+   /* USER CODE END SysTick_IRQn 0 */
+-- 
+2.56.1.windows.1
+

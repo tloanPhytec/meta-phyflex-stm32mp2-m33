@@ -1,0 +1,257 @@
+From d1e4d482533f61a34866e44f87b2298cc6baac82 Mon Sep 17 00:00:00 2001
+From: True Loan <tloan@phytec.com>
+Date: Wed, 18 Nov 2026 13:13:55 -0800
+Subject: [PATCH 5/6] phyFLEX-stm32mp2 M33 ADC SOM current example:
+ stm32cubemp2 v1.3.2
+
+   The default ADC_RegularConversion_Polling example has the following behavior:
+
+   - uses ADC3 channel 6 for a single 12-bit conversion (one shot).
+   - prints the raw ADC value and calculated input voltage once.
+
+   Here we are changing the example to measure the SOM's supply current on the
+   phyFLEX-STM32MP257 Development Kit and print it to UART5 every three
+   seconds:
+
+   - swaps ADC3_INP6 for ADC1_INP2 on processor pin PG2, which connects
+     to ADC_AIN0 on the carrier board, which is connected to a SOM current-sense
+     circuit.
+   - measures the divided VOUT_CC_SOM current-sense amplifier output
+     (equation provided in schematic, but you must also account for the voltage
+     divider connected to ADC_AIN0, which this firmware does).
+   - uses ADC12's divide-by-four prescaler, giving a 50 MHz ADC clock
+     from the default 200 MHz ck_icn_ls_mcu source.
+   - uses long sampling to allow the current-sense input to settle.
+   - now runs in a loop forever (unless Linux shuts it down).
+
+   The ADC kernel clock must be below the specified 70 MHz maximum (see
+   datasheet Table 87). The original divide-by-two setting would produce 100 MHz
+   with our selected clock source. Short sampling also produced false, high
+   readings; correcting the clock and using long sampling resulted in ADC conversions
+   that agreed with the voltage measured manually at X12.
+
+   The example already uses SCMI to request the ADC supply from OP-TEE.
+   Here we are also marking its shared-memory region as noncacheable so the M33
+   sees updated SCMI request/response data without throwing errors.
+
+   Only request GPIOG clock-control access and enable its clock when the
+   clock is off. This avoids an unnecessary protected-register write
+   when GPIOG is already clocked.
+
+   Linux's adc_12 controller and UART5 must be disabled in the active
+   device tree so Linux does not compete with the Cortex-M33. The updated
+   M33-examples overlay must be compiled, deployed to /boot/overlays/,
+   and enabled at boot.
+
+Signed-off-by: True Loan <tloan@phytec.com>
+---
+ .../CM33/NonSecure/Src/main.c                 | 51 +++++++++++++------
+ .../CM33/NonSecure/Src/stm32mp2xx_hal_msp.c   | 30 +++++++----
+ 2 files changed, 55 insertions(+), 26 deletions(-)
+
+diff --git a/Projects/STM32MP257F-EV1/Examples/ADC/ADC_RegularConversion_Polling/CM33/NonSecure/Src/main.c b/Projects/STM32MP257F-EV1/Examples/ADC/ADC_RegularConversion_Polling/CM33/NonSecure/Src/main.c
+index a003876..4cbda7e 100644
+--- a/Projects/STM32MP257F-EV1/Examples/ADC/ADC_RegularConversion_Polling/CM33/NonSecure/Src/main.c
++++ b/Projects/STM32MP257F-EV1/Examples/ADC/ADC_RegularConversion_Polling/CM33/NonSecure/Src/main.c
+@@ -85,6 +85,7 @@ static uint32_t                  ipcc_ch_id         ;
+ static void SystemClock_Config(void);
+ static void MX_ADC_DeInit(void);
+ static void MX_ADC_Init(void);
++static void ADC_ReadAndPrint(void);
+ static void MX_IPCC_Init(void);
+ #ifdef ICACHE_DCACHE_ENABLE
+ static void MX_ICACHE_Init(void);
+@@ -179,7 +180,8 @@ int main(void)
+   MX_TIMx_Init();
+   MX_ADC_Init();
+ 
+-  printf("uwConvertedValue = %lu,    uwInputVoltage = %ld    (ADC_RegularConversion)\r\n", uwConvertedValue, uwInputVoltage);
++  uint32_t last_adc_tick = HAL_GetTick();
++  ADC_ReadAndPrint();
+ 
+   /* Infinite loop */
+   while (1)
+@@ -195,6 +197,12 @@ int main(void)
+       Shutdown_Routine();
+       g_shutdown_flag = 0;
+     }
++
++    if ((HAL_GetTick() - last_adc_tick) >= 3000U)
++    {
++      last_adc_tick = HAL_GetTick();
++      ADC_ReadAndPrint();
++    }
+   }
+   /* USER CODE END 3 */
+ }
+@@ -363,23 +371,23 @@ static void MX_ADC_Init(void)
+       loc_printf("Successfully enabled VOLTD_SCMI_ADC\r\n");
+   }
+ 
+-  /* Acquire ADC3 using Resource manager */
+-  if (RESMGR_STATUS_ACCESS_OK != ResMgr_Request(RESMGR_RESOURCE_RIFSC, STM32MP25_RIFSC_ADC3_ID))
++  /* Acquire ADC12 using Resource manager */
++  if (RESMGR_STATUS_ACCESS_OK != ResMgr_Request(RESMGR_RESOURCE_RIFSC, STM32MP25_RIFSC_ADC12_ID))
+   {
+-    loc_printf("Error : ResMgr_Request failed for STM32MP25_RIFSC_ADC3_ID \r\n");
++    loc_printf("Error : ResMgr_Request failed for STM32MP25_RIFSC_ADC12_ID \r\n");
+     Error_Handler();
+   }
+ 
+-  /* Acquire GPIOF11 using Resource manager */
+-  if (RESMGR_STATUS_ACCESS_OK != ResMgr_Request(RESMGR_RESOURCE_RIF_GPIOF, RESMGR_GPIO_PIN(11)))
++  /* Acquire GPIOG2 using Resource manager */
++  if (RESMGR_STATUS_ACCESS_OK != ResMgr_Request(RESMGR_RESOURCE_RIF_GPIOG, RESMGR_GPIO_PIN(2)))
+   {
+-    loc_printf("Error : ResMgr_Request failed for GPIOF-PIN-11 \r\n");
++    loc_printf("Error : ResMgr_Request failed for GPIOG-PIN-2 \r\n");
+     Error_Handler();
+   }
+ 
+   /*##-1- Configure the ADC peripheral #######################################*/
+-  AdcHandle.Instance                      = ADC3;
+-  AdcHandle.Init.ClockPrescaler           = ADC_CLOCK_CK_KER_ADC3_DIV2;    /* Asynchronous clock mode, input ADC clock divided by 2*/
++  AdcHandle.Instance                      = ADC1;
++  AdcHandle.Init.ClockPrescaler           = ADC_CLOCK_CK_KER_ADC12_DIV4;    /* Asynchronous clock mode, input ADC clock divided by 4*/
+   AdcHandle.Init.Resolution               = ADC_RESOLUTION_12B;            /* 12-bit resolution for converted data */
+   AdcHandle.Init.ScanConvMode             = DISABLE;                       /* Sequencer disabled (ADC conversion on only 1 channel: channel set on rank 1) */
+   AdcHandle.Init.EOCSelection             = ADC_EOC_SINGLE_CONV;           /* EOC flag picked-up to indicate conversion end */
+@@ -403,9 +411,9 @@ static void MX_ADC_Init(void)
+   ADC_ChannelConfTypeDef sConfig;
+ 
+   /*##-2- Configure ADC regular channel ######################################*/
+-  sConfig.Channel      = ADC_CHANNEL_6;                /* Sampled channel number */
++  sConfig.Channel      = ADC_CHANNEL_2;                /* Sampled channel number */
+   sConfig.Rank         = ADC_REGULAR_RANK_1;          /* Rank of sampled channel number ADCx_CHANNEL */
+-  sConfig.SamplingTime = ADC_SAMPLETIME_7CYCLES_5;    /* Sampling time (number of clock cycles unit) */
++  sConfig.SamplingTime = ADC_SAMPLETIME_1501CYCLES_5; /* Sampling time (number of clock cycles unit) */
+   sConfig.SingleDiff   = ADC_SINGLE_ENDED;            /* Single-ended input channel */
+   sConfig.OffsetNumber = ADC_OFFSET_NONE;             /* No offset subtraction */
+   sConfig.Offset = 0;                                 /* Parameter discarded because offset correction is disabled */
+@@ -423,7 +431,10 @@ static void MX_ADC_Init(void)
+     /* Calibration Error */
+     Error_Handler();
+   }
++}
+ 
++static void ADC_ReadAndPrint(void)
++{
+   /*##-4- Start the conversion process #######################################*/
+   if (HAL_ADC_Start(&AdcHandle) != HAL_OK)
+   {
+@@ -449,6 +460,10 @@ static void MX_ADC_Init(void)
+     /* Vref = 1.8 V */
+     uwInputVoltage = (uwConvertedValue * 1800) / 0xFFF;
+   }
++
++  /* 1.8 V reference; 4 mOhm shunt; gain 100; divider 10k / 28.2k. */
++  uint32_t som_current_ma = (uwConvertedValue * 12690U + 2047U) / 4095U;
++  printf("SOM current: %lu mA\r\n", (unsigned long)som_current_ma);
+ }
+ 
+ /**
+@@ -461,8 +476,8 @@ static void MX_ADC_DeInit(void)
+   /* Deinitialize the ADC peripheral */
+   HAL_ADC_DeInit(&AdcHandle);
+ 
+-  /* Release ADC3 using Resource manager */
+-  ResMgr_Release(RESMGR_RESOURCE_RIFSC, STM32MP25_RIFSC_ADC3_ID);
++  /* Release ADC12 using Resource manager */
++  ResMgr_Release(RESMGR_RESOURCE_RIFSC, STM32MP25_RIFSC_ADC12_ID);
+ 
+   /* Disable ADC regulator */
+   if(ResMgr_Request(RESMGR_RESOURCE_RIF_PWR, RESMGR_PWR_RESOURCE(0)) == RESMGR_STATUS_ACCESS_OK)
+@@ -483,8 +498,8 @@ static void MX_ADC_DeInit(void)
+ 
+   ResMgr_Release(RESMGR_RESOURCE_RIF_PWR, RESMGR_PWR_RESOURCE(0));
+ 
+-  /* Release GPIOF11 using Resource manager */
+-  ResMgr_Release(RESMGR_RESOURCE_RIF_GPIOF, RESMGR_GPIO_PIN(11));
++  /* Release GPIOG2 using Resource manager */
++  ResMgr_Release(RESMGR_RESOURCE_RIF_GPIOG, RESMGR_GPIO_PIN(2));
+   ResMgr_Release(RESMGR_RESOURCE_RIF_RCC, RESMGR_RCC_RESOURCE(101));
+ }
+ 
+@@ -697,6 +712,12 @@ static void MPU_Config(void)
+    MPU_InitStruct.Number = MPU_REGION_NUMBER2;
+    HAL_MPU_ConfigRegion(&MPU_InitStruct);
+ 
++   /* SCMI shared memory: the A35/OP-TEE must see requests immediately. */
++   MPU_InitStruct.BaseAddress = SCMI_SHM_START_ADDRESS;
++   MPU_InitStruct.LimitAddress = (uint32_t)&__SCMI_SHM_region_end__ - 1U;
++   MPU_InitStruct.Number = MPU_REGION_NUMBER3;
++   HAL_MPU_ConfigRegion(&MPU_InitStruct); /* Reuse noncacheable attributes above. */
++
+    HAL_MPU_Enable(MPU_PRIVILEGED_DEFAULT);
+ }
+ #endif
+diff --git a/Projects/STM32MP257F-EV1/Examples/ADC/ADC_RegularConversion_Polling/CM33/NonSecure/Src/stm32mp2xx_hal_msp.c b/Projects/STM32MP257F-EV1/Examples/ADC/ADC_RegularConversion_Polling/CM33/NonSecure/Src/stm32mp2xx_hal_msp.c
+index eef093d..786dfa0 100644
+--- a/Projects/STM32MP257F-EV1/Examples/ADC/ADC_RegularConversion_Polling/CM33/NonSecure/Src/stm32mp2xx_hal_msp.c
++++ b/Projects/STM32MP257F-EV1/Examples/ADC/ADC_RegularConversion_Polling/CM33/NonSecure/Src/stm32mp2xx_hal_msp.c
+@@ -73,7 +73,7 @@ void HAL_ADC_MspInit(ADC_HandleTypeDef *hadc)
+ {
+   GPIO_InitTypeDef          GPIO_InitStruct;
+ 
+-  if (ADC3 == hadc->Instance)
++  if (ADC1 == hadc->Instance)
+   {
+     if(IS_DEVELOPER_BOOT_MODE())
+     {
+@@ -81,18 +81,26 @@ void HAL_ADC_MspInit(ADC_HandleTypeDef *hadc)
+     }
+ 
+     /* Select ADC kernel source clock */
+-    __HAL_RCC_ADC3KERCLK_SETSOURCE(RCC_ADC3KERCLKSOURCE_CK_ICN_LS_MCU);
++    __HAL_RCC_ADC12KERCLK_SETSOURCE(RCC_ADC12KERCLKSOURCE_CK_ICN_LS_MCU);
+     /* ADC clock enable */
+-    __HAL_RCC_ADC3_CLK_ENABLE();
++    __HAL_RCC_ADC12_CLK_ENABLE();
+ 
+-    __HAL_RCC_ADC3_FORCE_RESET();
+-    __HAL_RCC_ADC3_RELEASE_RESET();
++    __HAL_RCC_ADC12_FORCE_RESET();
++    __HAL_RCC_ADC12_RELEASE_RESET();
+ 
+     /* ADC Channel GPIO pin configuration */
+-    GPIO_InitStruct.Pin = GPIO_PIN_11;
++    if (!__HAL_RCC_GPIOG_IS_CLK_ENABLED())
++    {
++      if (ResMgr_Request(RESMGR_RESOURCE_RIF_RCC, RESMGR_RCC_RESOURCE(96)) != RESMGR_STATUS_ACCESS_OK)
++      {
++        Error_Handler();
++      }
++      __HAL_RCC_GPIOG_CLK_ENABLE();
++    }
++    GPIO_InitStruct.Pin = GPIO_PIN_2;
+     GPIO_InitStruct.Mode = GPIO_MODE_ANALOG;
+     GPIO_InitStruct.Pull = GPIO_NOPULL;
+-    HAL_GPIO_Init(GPIOF, &GPIO_InitStruct);
++    HAL_GPIO_Init(GPIOG, &GPIO_InitStruct);
+   }
+ }
+ 
+@@ -106,16 +114,16 @@ void HAL_ADC_MspInit(ADC_HandleTypeDef *hadc)
+   */
+ void HAL_ADC_MspDeInit(ADC_HandleTypeDef *hadc)
+ {
+-  if (ADC3 == hadc->Instance)
++  if (ADC1 == hadc->Instance)
+   {
+     /* Setting clock source to default value */
+-    __HAL_RCC_ADC3KERCLK_SETSOURCE(RCC_ADC3KERCLKSOURCE_CK_KER_ADC3);
++    __HAL_RCC_ADC12KERCLK_SETSOURCE(RCC_ADC12KERCLKSOURCE_CK_KER_ADC12);
+ 
+     /* ADC clock disable */
+-    __HAL_RCC_ADC3_CLK_DISABLE();
++    __HAL_RCC_ADC12_CLK_DISABLE();
+ 
+     /* De-initialize the ADC Channel GPIO pin */
+-    HAL_GPIO_DeInit(GPIOF, GPIO_PIN_11);
++    HAL_GPIO_DeInit(GPIOG, GPIO_PIN_2);
+   }
+ }
+ 
+-- 
+2.56.1.windows.1
+

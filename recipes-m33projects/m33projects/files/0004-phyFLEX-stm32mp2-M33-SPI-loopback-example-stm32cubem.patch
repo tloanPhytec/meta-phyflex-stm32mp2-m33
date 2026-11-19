@@ -1,0 +1,965 @@
+From 57c45541d5f2e3ae956a4e67606094399a7d4d8e Mon Sep 17 00:00:00 2001
+From: True Loan <tloan@phytec.com>
+Date: Tue, 17 Nov 2026 11:36:44 -0800
+Subject: [PATCH 4/6] phyFLEX-stm32mp2 M33 SPI loopback example: stm32cubemp2
+ v1.3.2
+
+   The default SPI_FullDuplex_ComDMA example has the following behavior:
+
+   - uses SPI3 to communicate between two STM32MP257-EV1 boards using DMA.
+   - it requires configuring one board as master and the other as slave.
+   - waits for a USER2 button press before the master exchanges a fixed message.
+   - performs the exchange once and compares the transmit and receive buffers.
+   - blinks LED3 on success.
+
+   Here we are changing the example to run SPI2 as master on one
+   phyFLEX-STM32MP257 Development Kit, with MOSI connected back to MISO
+   using a jumper wire for a hardware loopback test:
+
+   - uses PB0 for SPI2 SCK, PB2 for MOSI, and PB6 for MISO.
+   - connect PB2 to PB6 for external loopback.
+   - uses SPI mode 0 with 8-bit data, MSB first.
+   - starts one DMA test for each debounced USER2 button press.
+   - transmits DE AD BE EF CA FE and receives into a separate buffer.
+   - prints TX/RX data and PASS/FAIL through UART5 at 115200 baud, 8N1,
+     without flow control.
+   - leaves LED3 on after failure and clears it after a successful test.
+   - handles transfer timeouts and allows subsequent tests to retry.
+
+   Connecting/removing the loopback wire can induce a successful
+   test, as well as a data-mismatch failure in order to verify the
+   interface.
+
+   In production boot mode, SPI2 needs a clock source managed by OP-TEE
+   and this is not enabled by default in the current phyFLEX-STM32MP257 BSP.
+   The SPI_FullDuplex_ComDMA example now uses ST's existing SCMI middleware
+   to request OP-TEE for that clock when the firmware starts.
+
+   The STM32MP257 supplies SPI2's kernel clock from FLEXGEN channel 10
+   (ck_flexgen_10). The M33 firmware requests this clock from OP-TEE
+   using SCMI clock ID 10.
+
+Signed-off-by: True Loan <tloan@phytec.com>
+---
+ .../CM33/NonSecure/Inc/main.h                 |   1 -
+ .../CM33/NonSecure/Inc/spi2_scmi.h            |  12 +
+ .../CM33/NonSecure/Inc/stm32mp2xx_it.h        |   2 +-
+ .../CM33/NonSecure/Src/main.c                 | 436 +++++++++++-------
+ .../CM33/NonSecure/Src/stm32mp2xx_hal_msp.c   |  57 +--
+ .../CM33/NonSecure/Src/stm32mp2xx_it.c        |   2 +-
+ .../STM32CubeIDE/CM33/NonSecure/.cproject     |   3 +
+ .../STM32CubeIDE/CM33/NonSecure/.project      |  40 +-
+ 8 files changed, 331 insertions(+), 222 deletions(-)
+ create mode 100644 Projects/STM32MP257F-EV1/Examples/SPI/SPI_FullDuplex_ComDMA/CM33/NonSecure/Inc/spi2_scmi.h
+
+diff --git a/Projects/STM32MP257F-EV1/Examples/SPI/SPI_FullDuplex_ComDMA/CM33/NonSecure/Inc/main.h b/Projects/STM32MP257F-EV1/Examples/SPI/SPI_FullDuplex_ComDMA/CM33/NonSecure/Inc/main.h
+index 2d1a56f..2041dbd 100644
+--- a/Projects/STM32MP257F-EV1/Examples/SPI/SPI_FullDuplex_ComDMA/CM33/NonSecure/Inc/main.h
++++ b/Projects/STM32MP257F-EV1/Examples/SPI/SPI_FullDuplex_ComDMA/CM33/NonSecure/Inc/main.h
+@@ -41,7 +41,6 @@
+ /* Exported macro ------------------------------------------------------------*/
+ /* USER CODE BEGIN EM */
+ /* Size of buffer */
+-#define BUFFERSIZE                       (COUNTOF(aTxBuffer) - 1)
+ 
+ #define COUNTOF(__BUFFER__)   (sizeof(__BUFFER__) / sizeof(*(__BUFFER__)))
+ /* Exported functions ------------------------------------------------------- */
+diff --git a/Projects/STM32MP257F-EV1/Examples/SPI/SPI_FullDuplex_ComDMA/CM33/NonSecure/Inc/spi2_scmi.h b/Projects/STM32MP257F-EV1/Examples/SPI/SPI_FullDuplex_ComDMA/CM33/NonSecure/Inc/spi2_scmi.h
+new file mode 100644
+index 0000000..4b263e0
+--- /dev/null
++++ b/Projects/STM32MP257F-EV1/Examples/SPI/SPI_FullDuplex_ComDMA/CM33/NonSecure/Inc/spi2_scmi.h
+@@ -0,0 +1,12 @@
++/* SPI2's upstream clock service: application configuration. */
++#ifndef SPI2_SCMI_H
++#define SPI2_SCMI_H
++
++#include "scmi.h"
++
++/* Verified on phyFLEX-STM32MP257: M33 clock ID 10 maps to ck_flexgen_10.
++ * Keep the name check; this mapping depends on the OP-TEE configuration. */
++#define SPI2_SCMI_CLOCK_ID       10U
++#define SPI2_SCMI_CLOCK_NAME     "ck_flexgen_10"
++
++#endif
+diff --git a/Projects/STM32MP257F-EV1/Examples/SPI/SPI_FullDuplex_ComDMA/CM33/NonSecure/Inc/stm32mp2xx_it.h b/Projects/STM32MP257F-EV1/Examples/SPI/SPI_FullDuplex_ComDMA/CM33/NonSecure/Inc/stm32mp2xx_it.h
+index 055acb6..1d3e14c 100644
+--- a/Projects/STM32MP257F-EV1/Examples/SPI/SPI_FullDuplex_ComDMA/CM33/NonSecure/Inc/stm32mp2xx_it.h
++++ b/Projects/STM32MP257F-EV1/Examples/SPI/SPI_FullDuplex_ComDMA/CM33/NonSecure/Inc/stm32mp2xx_it.h
+@@ -44,7 +44,7 @@ void PendSV_Handler(void);
+ void SysTick_Handler(void);
+ void HPDMA3_Channel2_IRQHandler(void);
+ void HPDMA3_Channel3_IRQHandler(void);
+-void SPI3_IRQHandler(void);
++void SPI2_IRQHandler(void);
+ void IPCC1_RX_IRQHandler(void);
+ 
+ #ifdef __cplusplus
+diff --git a/Projects/STM32MP257F-EV1/Examples/SPI/SPI_FullDuplex_ComDMA/CM33/NonSecure/Src/main.c b/Projects/STM32MP257F-EV1/Examples/SPI/SPI_FullDuplex_ComDMA/CM33/NonSecure/Src/main.c
+index 130df3a..2738157 100644
+--- a/Projects/STM32MP257F-EV1/Examples/SPI/SPI_FullDuplex_ComDMA/CM33/NonSecure/Src/main.c
++++ b/Projects/STM32MP257F-EV1/Examples/SPI/SPI_FullDuplex_ComDMA/CM33/NonSecure/Src/main.c
+@@ -22,6 +22,11 @@
+ /* Includes ------------------------------------------------------------------*/
+ #include "main.h"
+ #include "copro_sync.h"
++#include "res_mgr.h"
++#include "spi2_scmi.h"
++#include "mbox_scmi.h"
++#include <stdio.h>
++#include <string.h>
+ 
+ /** @addtogroup STM32MP2xx_HAL_Examples
+   * @{
+@@ -40,8 +45,9 @@ enum {
+ };
+ 
+ /* Private macro -------------------------------------------------------------*/
+-/* Uncomment this line to use the board as master, if not it is used as slave */
+-//#define MASTER_BOARD
++/* One-board external loopback. */
++#define LOOPBACK_TIMEOUT_MS 1000U
++#define BUTTON_DEBOUNCE_MS 30U
+ #ifdef ICACHE_DCACHE_USE
+ #define ICACHE_DCACHE_ENABLE
+ #endif /* ICACHE_DCACHE_ENABLE */
+@@ -49,15 +55,19 @@ enum {
+ /* Private variables ---------------------------------------------------------*/
+ /* IPCC handler declaration */
+ IPCC_HandleTypeDef   hipcc1;
++static volatile uint32_t shutdown_requested;
++static uint32_t shutdown_channel;
++static uint8_t spi2_initialized;
++static uint8_t spi2_clock_held;
+ 
+ /* SPI handler declaration */
+ SPI_HandleTypeDef SpiHandle;
+ 
+-/* Buffer used for transmission */
+-const uint8_t aTxBuffer[] = "****SPI - Two Boards communication based on DMA **** SPI Message ********* SPI Message *********";
+-
+-/* Buffer used for reception */
+-#define BUFFER_ALIGNED_SIZE (((BUFFERSIZE+31)/32)*32)
++/* Dedicated cache-line-aligned buffers for repeated DMA transfers. */
++#define LOOPBACK_DATA {0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE}
++#define BUFFERSIZE (sizeof((const uint8_t[])LOOPBACK_DATA))
++#define BUFFER_ALIGNED_SIZE (((BUFFERSIZE + 31U) / 32U) * 32U)
++ALIGN_32BYTES(const uint8_t aTxBuffer[BUFFER_ALIGNED_SIZE]) = LOOPBACK_DATA;
+ ALIGN_32BYTES(uint8_t aRxBuffer[BUFFER_ALIGNED_SIZE]);
+ 
+ /* transfer state */
+@@ -69,10 +79,14 @@ volatile uint8_t debug = 1;
+ 
+ /* Private function prototypes -----------------------------------------------*/
+ static void SystemClock_Config(void);
+-static void MX_GPIO_Init(void);
+ static void MX_DMA_Init(void);
+-static void MX_SPI3_Init(void);
++static void MX_SPI2_Init(void);
+ static void MX_IPCC_Init(void);
++static int SPI2_KernelClockAcquire(void);
++static void Shutdown(void);
++static void PrintBuffer(const char *label, const uint8_t *data);
++static void RunLoopback(void);
++static HAL_StatusTypeDef RecoverSPI2(void);
+ #ifdef ICACHE_DCACHE_ENABLE
+ static void MX_ICACHE_Init(void);
+ static void MX_DCACHE_Init(void);
+@@ -80,7 +94,6 @@ static void MPU_Config(void);
+ DCACHE_HandleTypeDef hdcache = {0};
+ #endif /* ICACHE_DCACHE_ENABLE */
+ void HAL_SPI_MspPostInit(SPI_HandleTypeDef* hspi);
+-static uint16_t Buffercmp(uint8_t *pBuffer1, uint8_t *pBuffer2, uint16_t BufferLength);
+ 
+ /* Private functions ---------------------------------------------------------*/
+ 
+@@ -139,14 +152,11 @@ int main(void)
+     SystemCoreClockUpdate();
+   }
+ 
+-#ifdef  MASTER_BOARD
+-  printf("\r\nLog : SPI example running (on SPI Master Board)\r\n");
+-#else   /* MASTER_BOARD */
+-  printf("\r\nLog : SPI example running (on SPI Slave Board)\r\n");
+-#endif  /* MASTER_BOARD */
+-
+   /* Configure LED3 */
+   BSP_LED_Init(LED3);
++  BSP_LED_Off(LED3);
++
++  BSP_PB_Init(BUTTON_USER2, BUTTON_MODE_GPIO);
+ 
+ 	if(!IS_DEVELOPER_BOOT_MODE())
+ 	{
+@@ -155,97 +165,42 @@ int main(void)
+ 
+ 		/*Corpo Sync Initialization*/
+ 		CoproSync_Init();
++		/* Initialize MAILBOX with IPCC peripheral */
++		if (MAILBOX_SCMI_Init() != 0)
++		  Error_Handler();
+ 	}
+ 
+-  /* Initialize all configured peripherals */
+-  MX_GPIO_Init();
+-  MX_DMA_Init();
+-  MX_SPI3_Init();
+-
+-#ifdef MASTER_BOARD
+-  printf("Log : Press USER2 button to start communication (on SPI Master Board)\r\n");
+-
+-  /* Configure User push-button */
+-  BSP_PB_Init(BUTTON_USER2, BUTTON_MODE_GPIO);
+-
+-  /* Infinite loop */
+-  /* Wait for User push-button press before starting the Communication */
+-  while (BSP_PB_GetState(BUTTON_USER2) != GPIO_PIN_SET)
+-  {
+-  }
+-
+-  /* Delay to avoid that possible signal rebound is taken as button release */
+-  HAL_Delay(50);
+-
+-  /* Wait for User push-button release before starting the Communication */
+-  while (BSP_PB_GetState(BUTTON_USER2) != GPIO_PIN_RESET)
+-  {
+-  }
+-
+-#endif
+-
+-  /*##-2- Start the Full Duplex Communication process ########################*/
+-  /* While the SPI in TransmitReceive process, user can transmit data through
+-     "aTxBuffer" buffer & receive data through "aRxBuffer" */
+-#ifdef  MASTER_BOARD
+-  printf("Log : Communication enabled (on SPI Master Board)\r\n");
+-#else   /* MASTER_BOARD */
+-  printf("Log : Communication enabled (on SPI Slave Board)\r\n");
+-#endif  /* MASTER_BOARD */
+-
+-#ifdef ICACHE_DCACHE_ENABLE
+-  /* Flushing the cache before DMA transfer */
+-  HAL_DCACHE_CleanByAddr(&hdcache, (uint32_t*)aTxBuffer, BUFFERSIZE);
+-#endif /* ICACHE_DCACHE_ENABLE */
+-
+-  if(HAL_SPI_TransmitReceive_DMA(&SpiHandle, (uint8_t*)aTxBuffer, (uint8_t *)aRxBuffer, BUFFERSIZE) != HAL_OK)
+-  {
+-    /* Transfer error in transmission process */
++  if (!IS_DEVELOPER_BOOT_MODE() && SPI2_KernelClockAcquire() != 0)
+     Error_Handler();
+-  }
+-
+-  /*##-3- Wait for the end of the transfer ###################################*/
+-  /*  Before starting a new communication transfer, you must wait the callback call
+-      to get the transfer complete confirmation or an error detection.
+-      For simplicity reasons, this example is just waiting till the end of the
+-      transfer, but application may perform other tasks while transfer operation
+-      is ongoing. */
+-  while (wTransferState == TRANSFER_WAIT)
+-  {
+-#ifdef  MASTER_BOARD
+-    printf("Log : Waiting for communication to finish (on SPI Master Board)\r\n");
+-#else   /* MASTER_BOARD */
+-    printf("Log : Waiting for SPI master to start communication (on SPI Slave Board)\r\n");
+-#endif  /* MASTER_BOARD */
+-    HAL_Delay(1000);
+-  }
+-#ifdef ICACHE_DCACHE_ENABLE
+-  /* Invalidating cache lines after DMA transfer */
+-  HAL_DCACHE_InvalidateByAddr(&hdcache, (uint32_t*)aRxBuffer,BUFFERSIZE);
+-#endif /* ICACHE_DCACHE_ENABLE */
+-
+-  switch(wTransferState)
+-  {
+-    case TRANSFER_COMPLETE :
+-      /*##-4- Compare the sent and received buffers ##############################*/
+-      if(Buffercmp((uint8_t*)aTxBuffer, (uint8_t*)aRxBuffer, BUFFERSIZE))
+-      {
+-        printf("Error : SPI example failed (TX-RX data mismatch)\r\n");
+-        /* Processing Error */
+-        Error_Handler();
+-      }
+-      printf("Log : SPI example working fine\r\n");
+-      break;
+-    default :
+-      Error_Handler();
+-      break;
+-  }
++  if (shutdown_requested) Shutdown();
+ 
+-  /* Infinite loop */
++  /* Initialize all configured peripherals */
++  MX_DMA_Init();
++  MX_SPI2_Init();
++  spi2_initialized = 1U;
++  printf("SPI2 loopback ready. Press USER2 to test.\r\n");
++
++  /* Require a debounced press edge; a held button does not repeat. */
++  uint32_t raw = BSP_PB_GetState(BUTTON_USER2);
++  uint32_t stable = raw;
++  uint32_t changed_at = HAL_GetTick();
+   while (1)
+   {
+-    BSP_LED_Toggle(LED3);
+-	HAL_Delay(500);
++    if (shutdown_requested) Shutdown();
++    uint32_t now = HAL_GetTick();
++    uint32_t sample = BSP_PB_GetState(BUTTON_USER2);
++    if (sample != raw)
++    {
++      raw = sample;
++      changed_at = now;
++    }
++    if ((now - changed_at >= BUTTON_DEBOUNCE_MS) && (stable != raw))
++    {
++      stable = raw;
++      if (stable == GPIO_PIN_SET)
++        RunLoopback();
++    }
++    HAL_Delay(1);
+   }
+ 
+ }
+@@ -410,7 +365,7 @@ static void MX_DMA_Init(void)
+   * @retval None
+   */
+ 
+-static void MX_SPI3_Init(void)
++static void MX_SPI2_Init(void)
+ {
+ 
+   /* USER CODE BEGIN SPI3_Init 0 */
+@@ -422,7 +377,7 @@ static void MX_SPI3_Init(void)
+   /* USER CODE END SPI3_Init 1 */
+ 
+   /* Acquire SPI3 using Resource manager */
+-  if (RESMGR_STATUS_ACCESS_OK != ResMgr_Request(RESMGR_RESOURCE_RIFSC, STM32MP25_RIFSC_SPI3_ID))
++  if (RESMGR_STATUS_ACCESS_OK != ResMgr_Request(RESMGR_RESOURCE_RIFSC, STM32MP25_RIFSC_SPI2_ID))
+   {
+ 	  Error_Handler();
+   }
+@@ -440,34 +395,28 @@ static void MX_SPI3_Init(void)
+   }
+ 
+   /* Acquire GPIOB10 using Resource manager */
+-  if (RESMGR_STATUS_ACCESS_OK != ResMgr_Request(RESMGR_RESOURCE_RIF_GPIOB, RESMGR_GPIO_PIN(10)))
++  if (RESMGR_STATUS_ACCESS_OK != ResMgr_Request(RESMGR_RESOURCE_RIF_GPIOB, RESMGR_GPIO_PIN(6)))
+   {
+ 	  Error_Handler();
+   }
+ 
+   /* Acquire GPIOB8 using Resource manager */
+-  if (RESMGR_STATUS_ACCESS_OK != ResMgr_Request(RESMGR_RESOURCE_RIF_GPIOB, RESMGR_GPIO_PIN(8)))
++  if (RESMGR_STATUS_ACCESS_OK != ResMgr_Request(RESMGR_RESOURCE_RIF_GPIOB, RESMGR_GPIO_PIN(2)))
+   {
+ 	  Error_Handler();
+   }
+ 
+   /* Acquire GPIOB7 using Resource manager */
+-  if (RESMGR_STATUS_ACCESS_OK != ResMgr_Request(RESMGR_RESOURCE_RIF_GPIOB, RESMGR_GPIO_PIN(7)))
++  if (RESMGR_STATUS_ACCESS_OK != ResMgr_Request(RESMGR_RESOURCE_RIF_GPIOB, RESMGR_GPIO_PIN(0)))
+   {
+ 	  Error_Handler();
+   }
+ 
+-  /* Acquire GPIOB1 using Resource manager */
+-  if (RESMGR_STATUS_ACCESS_OK != ResMgr_Request(RESMGR_RESOURCE_RIF_GPIOB, RESMGR_GPIO_PIN(1)))
+-  {
+-	  Error_Handler();
+-  }
+ 
+-  /**SPI3 GPIO Configuration
+-	 PB10     ------> SPI3_MISO
+-	 PB8      ------> SPI3_MOSI
+-	 PB7      ------> SPI3_SCK
+-	 PB1      ------> SPI3_NSS
++  /**SPI2 GPIO Configuration
++	 PB6     ------> SPI2_MISO
++	 PB2      ------> SPI2_MOSI
++	 PB0      ------> SPI2_SCK
+    */
+ 
+   /* Enable GPIOs power supplies */
+@@ -478,7 +427,7 @@ static void MX_SPI3_Init(void)
+ 
+   /*##-1- Configure the SPI peripheral #######################################*/
+   /* Set the SPI parameters */
+-  SpiHandle.Instance               = SPI3;
++  SpiHandle.Instance               = SPI2;
+   SpiHandle.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_256;
+   SpiHandle.Init.Direction         = SPI_DIRECTION_2LINES;
+   SpiHandle.Init.CLKPhase          = SPI_PHASE_1EDGE;
+@@ -494,11 +443,7 @@ static void MX_SPI3_Init(void)
+   SpiHandle.Init.NSSPMode          = SPI_NSS_PULSE_DISABLE;
+   SpiHandle.Init.MasterKeepIOState = SPI_MASTER_KEEP_IO_STATE_ENABLE;  /* Recommended setting to avoid glitches */
+ 
+-#ifdef MASTER_BOARD
+   SpiHandle.Init.Mode = SPI_MODE_MASTER;
+-#else
+-  SpiHandle.Init.Mode = SPI_MODE_SLAVE;
+-#endif /* MASTER_BOARD */
+ 
+   if(HAL_SPI_Init(&SpiHandle) != HAL_OK)
+   {
+@@ -513,7 +458,7 @@ static void MX_SPI3_Init(void)
+   * @param 	None
+   * @retval None
+   */
+-void MX_SPI3_DeInit(void)
++void MX_SPI2_DeInit(void)
+ {
+ 	HAL_SPI_DeInit(&SpiHandle);
+ 
+@@ -524,61 +469,21 @@ void MX_SPI3_DeInit(void)
+ 	ResMgr_Release(RESMGR_RESOURCE_RIF_HPDMA3, RESMGR_HPDMA_CHANNEL(3));
+ 
+ 	/* Release SPI3 using Resource manager */
+-	ResMgr_Release(RESMGR_RESOURCE_RIFSC, STM32MP25_RIFSC_SPI8_ID);
++	ResMgr_Release(RESMGR_RESOURCE_RIFSC, STM32MP25_RIFSC_SPI2_ID);
+ 
+ 	/* Release GPIOB10 using Resource manager */
+-	ResMgr_Release(RESMGR_RESOURCE_RIF_GPIOB, RESMGR_GPIO_PIN(10));
++	ResMgr_Release(RESMGR_RESOURCE_RIF_GPIOB, RESMGR_GPIO_PIN(6));
+ 
+ 	/* Release GPIOB8 using Resource manager */
+-	ResMgr_Release(RESMGR_RESOURCE_RIF_GPIOB, RESMGR_GPIO_PIN(8));
++	ResMgr_Release(RESMGR_RESOURCE_RIF_GPIOB, RESMGR_GPIO_PIN(2));
+ 
+ 	/* Release GPIOB7 using Resource manager */
+-	ResMgr_Release(RESMGR_RESOURCE_RIF_GPIOB, RESMGR_GPIO_PIN(7));
++	ResMgr_Release(RESMGR_RESOURCE_RIF_GPIOB, RESMGR_GPIO_PIN(0));
+ 
+-	/* Release GPIOB1 using Resource manager */
+-	ResMgr_Release(RESMGR_RESOURCE_RIF_GPIOB, RESMGR_GPIO_PIN(1));
+ }
+ 
+ 
+-/**
+-  * @brief 	GPIO Initialization Function
+-  * @param 	None
+-  * @retval None
+-  */
+-static void MX_GPIO_Init(void)
+-{
+-/* USER CODE BEGIN MX_GPIO_Init_1 */
+-/* USER CODE END MX_GPIO_Init_1 */
+-
+-  /* GPIO Ports Clock Enable */
+-
+-/* USER CODE BEGIN MX_GPIO_Init_2 */
+-/* USER CODE END MX_GPIO_Init_2 */
+-}
+-
+ /* USER CODE BEGIN 4 */
+-/**
+-  * @brief  Compares two buffers.
+-  * @param  pBuffer1, pBuffer2: buffers to be compared.
+-  * @param  BufferLength: buffer's length
+-  * @retval 0  : pBuffer1 identical to pBuffer2
+-  *         >0 : pBuffer1 differs from pBuffer2
+-  */
+-static uint16_t Buffercmp(uint8_t *pBuffer1, uint8_t *pBuffer2, uint16_t BufferLength)
+-{
+-  while (BufferLength--)
+-  {
+-    if ((*pBuffer1) != *pBuffer2)
+-    {
+-      return BufferLength;
+-    }
+-    pBuffer1++;
+-    pBuffer2++;
+-  }
+-
+-  return 0;
+-}
+-
+ /**
+   * @brief  TxRx Transfer completed callback.
+   * @param  hspi: SPI handle
+@@ -588,7 +493,7 @@ static uint16_t Buffercmp(uint8_t *pBuffer1, uint8_t *pBuffer2, uint16_t BufferL
+   */
+ void HAL_SPI_TxRxCpltCallback(SPI_HandleTypeDef *hspi)
+ {
+-  wTransferState = TRANSFER_COMPLETE;
++  if (hspi == &SpiHandle) wTransferState = TRANSFER_COMPLETE;
+ }
+ 
+ /**
+@@ -600,7 +505,7 @@ void HAL_SPI_TxRxCpltCallback(SPI_HandleTypeDef *hspi)
+   */
+ void HAL_SPI_ErrorCallback(SPI_HandleTypeDef *hspi)
+ {
+-  wTransferState = TRANSFER_ERROR;
++  if (hspi == &SpiHandle) wTransferState = TRANSFER_ERROR;
+ }
+ 
+ /**
+@@ -629,14 +534,38 @@ static void MX_IPCC_Init(void)
+   */
+ void CoproSync_ShutdownCb(IPCC_HandleTypeDef * hipcc, uint32_t ChannelIndex, IPCC_CHANNELDirTypeDef ChannelDir)
+ {
+-  /* Deinitialize the SPI peripheral */
+-  MX_SPI3_DeInit();
++  /* This callback runs in the IPCC ISR. Main performs the blocking SCMI release. */
++  UNUSED(hipcc);
++  UNUSED(ChannelDir);
++  shutdown_channel = ChannelIndex;
++  shutdown_requested = 1U;
++}
++
++static void Shutdown(void)
++{
++  if (spi2_initialized) {
++    MX_SPI2_DeInit();
++    spi2_initialized = 0U;
++  }
++  if (spi2_clock_held) {
++    int ret = scmi_clock_disable(&scmi_channel, SPI2_SCMI_CLOCK_ID);
++    if (ret == 0) {
++      spi2_clock_held = 0U;
++    } else {
++      printf("SCMI: SPI2 source clock release failed: %d\r\n", ret);
++    }
++  }
++  MAILBOX_SCMI_DeInit();
++  BSP_PB_DeInit(BUTTON_USER2);
++#if defined (__VALID_OUTPUT_UART_IO__)
++  BSP_COM_DeInit(COM_VCP_CM33);
++#endif /* __VALID_OUTPUT_UART_IO__ */
+ 
+   /* Deinitialize the LED3 */
+   BSP_LED_DeInit(LED3);
+ 
+   /* When ready, notify the remote processor that we can be shut down */
+-  HAL_IPCC_NotifyCPU(hipcc, ChannelIndex, IPCC_CHANNEL_DIR_RX);
++  HAL_IPCC_NotifyCPU(&hipcc1, shutdown_channel, IPCC_CHANNEL_DIR_RX);
+ 
+   /* Wait for complete shutdown */
+   while(1);
+@@ -748,6 +677,12 @@ static void MPU_Config(void)
+    MPU_InitStruct.Number = MPU_REGION_NUMBER2;
+    HAL_MPU_ConfigRegion(&MPU_InitStruct);
+ 
++   /* SCMI shared memory: the A35/OP-TEE must see requests immediately. */
++   MPU_InitStruct.BaseAddress = SCMI_SHM_START_ADDRESS;
++   MPU_InitStruct.LimitAddress = (uint32_t)&__SCMI_SHM_region_end__ - 1U;
++   MPU_InitStruct.Number = MPU_REGION_NUMBER3;
++   HAL_MPU_ConfigRegion(&MPU_InitStruct); /* Reuse noncacheable attributes above. */
++
+    HAL_MPU_Enable(MPU_PRIVILEGED_DEFAULT);
+ }
+ #endif /* ICACHE_DCACHE_ENABLE */
+@@ -760,11 +695,12 @@ void Error_Handler(void)
+ {
+   /* USER CODE BEGIN Error_Handler_Debug */
+   /* Error if LED3 is ON */
+-  printf("Error : Something went wrong\r\n");
++  /* UART may not be initialized when startup fails. */
+   BSP_LED_On(LED3);
+   while (1)
+   {
+-    HAL_Delay(1000);
++    if (shutdown_requested) Shutdown();
++    HAL_Delay(10);
+   }
+   /* USER CODE END Error_Handler_Debug */
+ }
+@@ -786,3 +722,157 @@ void assert_failed(uint8_t *file, uint32_t line)
+   /* USER CODE END 6 */
+ }
+ #endif /* USE_FULL_ASSERT */
++
++/* Request the upstream supply; HAL_SPI_MspInit still enables SPI2's local gates. */
++static int SPI2_KernelClockAcquire(void)
++{
++  char name[17] = {0};
++  uint32_t attributes;
++  unsigned int rate_khz;
++  const char *step = "clock attributes";
++  int ret = scmi_clock_get_attributes(&scmi_channel, SPI2_SCMI_CLOCK_ID,
++                                      name, 16, &attributes);
++  if (ret != 0) goto failed;
++  if (strcmp(name, SPI2_SCMI_CLOCK_NAME) != 0) {
++    printf("SCMI: clock ID %u is '%s'; expected '%s'.\r\n",
++           SPI2_SCMI_CLOCK_ID, name, SPI2_SCMI_CLOCK_NAME);
++    return -1; /* No clock enable request was sent. */
++  }
++
++  step = "clock rate query";
++  ret = scmi_clock_get_rate(&scmi_channel, SPI2_SCMI_CLOCK_ID, &rate_khz);
++  if (ret != 0) goto failed;
++  if (rate_khz == 0U) {
++    printf("SCMI: source clock reports zero rate; check OP-TEE clock setup.\r\n");
++    return -1;
++  }
++  step = "clock enable";
++  ret = scmi_clock_enable(&scmi_channel, SPI2_SCMI_CLOCK_ID);
++  if (ret != 0) goto failed;
++  spi2_clock_held = 1U;
++  return 0;
++
++failed:
++  printf("SCMI: %s failed: %d\r\n", step, ret);
++  return ret;
++}
++
++static void RunLoopback(void)
++{
++  static uint32_t test_number;
++  static uint8_t recovery_needed;
++  if (recovery_needed)
++  {
++    if (RecoverSPI2() != HAL_OK)
++    {
++      BSP_LED_On(LED3);
++      printf("Recovery failed; press USER2 to retry recovery.\r\n");
++      return;
++    }
++    recovery_needed = 0;
++  }
++  ++test_number;
++  for (uint32_t i = 0; i < BUFFERSIZE; ++i)
++  {
++    aRxBuffer[i] = (uint8_t)~aTxBuffer[i];
++  }
++#ifdef ICACHE_DCACHE_ENABLE
++  /* Publish TX and discard dirty RX lines before DMA takes ownership. */
++  if (HAL_DCACHE_CleanByAddr(&hdcache, (const uint32_t *)aTxBuffer, sizeof(aTxBuffer)) != HAL_OK ||
++      HAL_DCACHE_CleanInvalidByAddr(&hdcache, (uint32_t *)aRxBuffer, sizeof(aRxBuffer)) != HAL_OK)
++    Error_Handler();
++#endif
++  printf("\r\nTest %lu: %u bytes, SPI mode 0\r\n",
++         (unsigned long)test_number, (unsigned)BUFFERSIZE);
++  wTransferState = TRANSFER_WAIT;
++  uint32_t start = HAL_GetTick();
++  HAL_StatusTypeDef status = HAL_SPI_TransmitReceive_DMA(
++      &SpiHandle, (uint8_t *)aTxBuffer, aRxBuffer, BUFFERSIZE);
++  while (status == HAL_OK && wTransferState == TRANSFER_WAIT &&
++         (HAL_GetTick() - start) < LOOPBACK_TIMEOUT_MS)
++  {
++    if (shutdown_requested) Shutdown();
++    /* DMA/SPI interrupts update wTransferState. */
++  }
++  if (status != HAL_OK || wTransferState != TRANSFER_COMPLETE)
++  {
++    BSP_LED_On(LED3);
++    printf("FAIL: SPI transfer failed or timed out.\r\n");
++    /* Stop DMA before any future buffer access; do not reuse a live transfer. */
++    if (HAL_SPI_Abort(&SpiHandle) != HAL_OK)
++    {
++      printf("Abort failed; recovering.\r\n");
++      recovery_needed = 1;
++      if (RecoverSPI2() != HAL_OK)
++      {
++        printf("Recovery failed; press USER2 to retry recovery.\r\n");
++        return;
++      }
++      recovery_needed = 0;
++    }
++    printf("Press USER2 to retry.\r\n");
++    return;
++  }
++#ifdef ICACHE_DCACHE_ENABLE
++  if (HAL_DCACHE_InvalidateByAddr(&hdcache, (uint32_t *)aRxBuffer, sizeof(aRxBuffer)) != HAL_OK)
++    Error_Handler();
++#endif
++  PrintBuffer("TX: ", aTxBuffer);
++  PrintBuffer("RX: ", aRxBuffer);
++  if (memcmp(aTxBuffer, aRxBuffer, BUFFERSIZE) != 0)
++  {
++    BSP_LED_On(LED3);
++    printf("FAIL: TX/RX mismatch. Check the loopback wire.\r\n");
++  }
++  else
++  {
++    BSP_LED_Off(LED3);
++    printf("PASS: all bytes match.\r\n");
++  }
++}
++
++static void PrintBuffer(const char *label, const uint8_t *data)
++{
++  printf("%s", label);
++  for (uint32_t i = 0; i < BUFFERSIZE; ++i)
++  {
++    printf("%02X ", (unsigned)data[i]);
++  }
++  printf("\r\n");
++}
++
++static HAL_StatusTypeDef RecoverSPI2(void)
++{
++  HAL_NVIC_DisableIRQ(SPI2_IRQn);
++  HAL_NVIC_DisableIRQ(HPDMA3_Channel2_IRQn);
++  HAL_NVIC_DisableIRQ(HPDMA3_Channel3_IRQn);
++  SPI2->IER = 0;
++  CLEAR_BIT(SPI2->CFG1, SPI_CFG1_TXDMAEN | SPI_CFG1_RXDMAEN);
++
++  HAL_StatusTypeDef tx = HAL_DMA_DeInit(SpiHandle.hdmatx);
++  HAL_StatusTypeDef rx = HAL_DMA_DeInit(SpiHandle.hdmarx);
++  if (tx != HAL_OK || rx != HAL_OK)
++    return HAL_ERROR;
++
++  __HAL_RCC_SPI2_FORCE_RESET();
++  __HAL_RCC_SPI2_RELEASE_RESET();
++  tx = HAL_DMA_Init(SpiHandle.hdmatx);
++  rx = HAL_DMA_Init(SpiHandle.hdmarx);
++  SpiHandle.hdmatx->Parent = &SpiHandle;
++  SpiHandle.hdmarx->Parent = &SpiHandle;
++  if (tx != HAL_OK || rx != HAL_OK)
++    return HAL_ERROR;
++
++  SpiHandle.State = HAL_SPI_STATE_ERROR;
++  SpiHandle.Lock = HAL_UNLOCKED;
++  if (HAL_SPI_Init(&SpiHandle) != HAL_OK)
++    return HAL_ERROR;
++
++  HAL_NVIC_ClearPendingIRQ(SPI2_IRQn);
++  HAL_NVIC_ClearPendingIRQ(HPDMA3_Channel2_IRQn);
++  HAL_NVIC_ClearPendingIRQ(HPDMA3_Channel3_IRQn);
++  HAL_NVIC_EnableIRQ(SPI2_IRQn);
++  HAL_NVIC_EnableIRQ(HPDMA3_Channel2_IRQn);
++  HAL_NVIC_EnableIRQ(HPDMA3_Channel3_IRQn);
++  return HAL_OK;
++}
+diff --git a/Projects/STM32MP257F-EV1/Examples/SPI/SPI_FullDuplex_ComDMA/CM33/NonSecure/Src/stm32mp2xx_hal_msp.c b/Projects/STM32MP257F-EV1/Examples/SPI/SPI_FullDuplex_ComDMA/CM33/NonSecure/Src/stm32mp2xx_hal_msp.c
+index 7e59e51..32519ca 100644
+--- a/Projects/STM32MP257F-EV1/Examples/SPI/SPI_FullDuplex_ComDMA/CM33/NonSecure/Src/stm32mp2xx_hal_msp.c
++++ b/Projects/STM32MP257F-EV1/Examples/SPI/SPI_FullDuplex_ComDMA/CM33/NonSecure/Src/stm32mp2xx_hal_msp.c
+@@ -23,28 +23,12 @@
+ static DMA_HandleTypeDef hdma_tx;
+ static DMA_HandleTypeDef hdma_rx;
+ 
+-extern void Error_Handler(void);
+-
+ /* USER CODE BEGIN 0 */
+ 
+ /* USER CODE END 0 */
+-/**
+-  * Initializes the Global MSP.
+-  */
+-void HAL_MspInit(void)
+-{
+-  /* USER CODE BEGIN MspInit 0 */
+-
+-  /* USER CODE END MspInit 0 */
+-
+-  /* USER CODE BEGIN MspInit 1 */
+-
+-  /* USER CODE END MspInit 1 */
+-}
+-
+ void HAL_SPI_MspInit(SPI_HandleTypeDef* hspi)
+ {
+-  if(SPI3 == hspi->Instance)
++  if(SPI2 == hspi->Instance)
+   {
+     /* USER CODE BEGIN SPI3_MspInit 0 */
+     /* USER CODE END SPI3_MspInit 0 */
+@@ -54,14 +38,14 @@ void HAL_SPI_MspInit(SPI_HandleTypeDef* hspi)
+       HAL_PWREx_EnableSupply(PWR_PVM_VDDIO4);
+     }
+ 
+-    __HAL_RCC_SPI3_CLK_ENABLE();
+-    __HAL_RCC_SPI3_FORCE_RESET();
+-    __HAL_RCC_SPI3_RELEASE_RESET();
++    __HAL_RCC_SPI2_CLK_ENABLE();
++    __HAL_RCC_SPI2_FORCE_RESET();
++    __HAL_RCC_SPI2_RELEASE_RESET();
+ 
+     /* SPI3 DMA Init */
+     /* SPI3_TX Init */
+     hdma_tx.Instance = HPDMA3_Channel2;
+-    hdma_tx.Init.Request = HPDMA_REQUEST_SPI3_TX;
++    hdma_tx.Init.Request = HPDMA_REQUEST_SPI2_TX;
+     hdma_tx.Init.Direction = DMA_MEMORY_TO_PERIPH;
+     hdma_tx.Init.SrcInc = DMA_SINC_INCREMENTED;
+     hdma_tx.Init.DestInc = DMA_DINC_FIXED;
+@@ -92,7 +76,7 @@ void HAL_SPI_MspInit(SPI_HandleTypeDef* hspi)
+ 
+     /* SPI3_RX Init */
+     hdma_rx.Instance = HPDMA3_Channel3;
+-    hdma_rx.Init.Request = HPDMA_REQUEST_SPI3_RX;
++    hdma_rx.Init.Request = HPDMA_REQUEST_SPI2_RX;
+     hdma_rx.Init.Direction = DMA_PERIPH_TO_MEMORY;
+     hdma_rx.Init.SrcInc = DMA_SINC_FIXED;
+     hdma_rx.Init.DestInc = DMA_DINC_INCREMENTED;
+@@ -119,8 +103,8 @@ void HAL_SPI_MspInit(SPI_HandleTypeDef* hspi)
+ #endif /* __ARM_FEATURE_CMSE */
+ 
+     /* SPI3 interrupt Init */
+-    HAL_NVIC_SetPriority(SPI3_IRQn, DEFAULT_IRQ_PRIO, 0);
+-    HAL_NVIC_EnableIRQ(SPI3_IRQn);
++    HAL_NVIC_SetPriority(SPI2_IRQn, DEFAULT_IRQ_PRIO, 0);
++    HAL_NVIC_EnableIRQ(SPI2_IRQn);
+ 
+     /* NVIC configuration for DMA transfer complete interrupt */
+     HAL_NVIC_SetPriority(HPDMA3_Channel2_IRQn, 0x00, 0);
+@@ -142,13 +126,13 @@ void HAL_SPI_MspPostInit(SPI_HandleTypeDef* hspi)
+ 	/* USER CODE BEGIN SPI_MspPostInit 0 */
+ 
+ 	/* USER CODE END SPI_MspPostInit 0 */
+-	if(SPI3 == hspi->Instance)
++	if(SPI2 == hspi->Instance)
+ 	{
+-	    GPIO_InitStruct.Pin = GPIO_PIN_10 | GPIO_PIN_8 | GPIO_PIN_7 | GPIO_PIN_1;
++	    GPIO_InitStruct.Pin = GPIO_PIN_6 | GPIO_PIN_2 | GPIO_PIN_0;
+ 	    GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
+ 	    GPIO_InitStruct.Pull = GPIO_PULLDOWN;
+ 	    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
+-	    GPIO_InitStruct.Alternate = GPIO_AF1_SPI_I2S3;
++	    GPIO_InitStruct.Alternate = GPIO_AF2_SPI_I2S2;
+ 	    HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+ 	}
+ }
+@@ -158,25 +142,26 @@ void HAL_SPI_MspDeInit(SPI_HandleTypeDef* hspi)
+   /* USER CODE BEGIN SPI3_MspDeInit 0 */
+ 
+   /* USER CODE END SPI3_MspDeInit 0 */
+-  if(SPI3 == hspi->Instance)
++  if(SPI2 == hspi->Instance)
+   {
+ 	/* Peripheral clock disable */
+-	__HAL_RCC_SPI3_CLK_DISABLE();
++	__HAL_RCC_SPI2_CLK_DISABLE();
+ 
+-    /**SPI3 GPIO Configuration
+-		PB10     ------> SPI3_MISO
+-		PB8      ------> SPI3_MOSI
+-		PB7      ------> SPI3_SCK
+-		PB1      ------> SPI3_NSS
++    /**SPI2 GPIO Configuration
++		PB6     ------> SPI2_MISO
++		PB2      ------> SPI2_MOSI
++		PB0      ------> SPI2_SCK
+     */
+-    HAL_GPIO_DeInit(GPIOZ, GPIO_PIN_10 | GPIO_PIN_8 | GPIO_PIN_7 | GPIO_PIN_1);
++    HAL_GPIO_DeInit(GPIOB, GPIO_PIN_6 | GPIO_PIN_2 | GPIO_PIN_0);
+ 
+     /* SPI3 DMA DeInit */
+     HAL_DMA_DeInit(hspi->hdmatx);
+     HAL_DMA_DeInit(hspi->hdmarx);
+ 
+     /* SPI3 interrupt DeInit */
+-    HAL_NVIC_DisableIRQ(SPI3_IRQn);
++    HAL_NVIC_DisableIRQ(SPI2_IRQn);
++    HAL_NVIC_DisableIRQ(HPDMA3_Channel2_IRQn);
++    HAL_NVIC_DisableIRQ(HPDMA3_Channel3_IRQn);
+ 
+ 	/* USER CODE BEGIN SPI3_MspDeInit 1 */
+ 	/* USER CODE END SPI3_MspDeInit 1 */
+diff --git a/Projects/STM32MP257F-EV1/Examples/SPI/SPI_FullDuplex_ComDMA/CM33/NonSecure/Src/stm32mp2xx_it.c b/Projects/STM32MP257F-EV1/Examples/SPI/SPI_FullDuplex_ComDMA/CM33/NonSecure/Src/stm32mp2xx_it.c
+index f520ddc..1b7e03d 100644
+--- a/Projects/STM32MP257F-EV1/Examples/SPI/SPI_FullDuplex_ComDMA/CM33/NonSecure/Src/stm32mp2xx_it.c
++++ b/Projects/STM32MP257F-EV1/Examples/SPI/SPI_FullDuplex_ComDMA/CM33/NonSecure/Src/stm32mp2xx_it.c
+@@ -218,7 +218,7 @@ void HPDMA3_Channel3_IRQHandler(void)
+ /**
+ * @brief This function handles SPI3 interrupt.
+ */
+-void SPI3_IRQHandler(void)
++void SPI2_IRQHandler(void)
+ {
+   /* USER CODE BEGIN SPI3_EV_IRQn 0 */
+ 
+diff --git a/Projects/STM32MP257F-EV1/Examples/SPI/SPI_FullDuplex_ComDMA/STM32CubeIDE/CM33/NonSecure/.cproject b/Projects/STM32MP257F-EV1/Examples/SPI/SPI_FullDuplex_ComDMA/STM32CubeIDE/CM33/NonSecure/.cproject
+index 9016716..00733e3 100644
+--- a/Projects/STM32MP257F-EV1/Examples/SPI/SPI_FullDuplex_ComDMA/STM32CubeIDE/CM33/NonSecure/.cproject
++++ b/Projects/STM32MP257F-EV1/Examples/SPI/SPI_FullDuplex_ComDMA/STM32CubeIDE/CM33/NonSecure/.cproject
+@@ -61,6 +61,7 @@
+ 									<listOptionValue builtIn="false" value="../../../../../../../../../Drivers/CMSIS/Include"/>
+ 									<listOptionValue builtIn="false" value="../../../../../../../../../Utilities/ResourcesManager"/>
+ 									<listOptionValue builtIn="false" value="../../../../../../../../../Utilities/CoproSync"/>
++									<listOptionValue builtIn="false" value="../../../../../../../../../Middlewares/ST/scmiagent"/>
+ 								</option>
+ 								<inputType id="com.st.stm32cube.ide.mcu.gnu.managedbuild.tool.c.compiler.input.c.438019922" superClass="com.st.stm32cube.ide.mcu.gnu.managedbuild.tool.c.compiler.input.c"/>
+ 							</tool>
+@@ -160,6 +161,7 @@
+ 									<listOptionValue builtIn="false" value="../../../../../../../../../Drivers/CMSIS/Include"/>
+ 									<listOptionValue builtIn="false" value="../../../../../../../../../Utilities/ResourcesManager"/>
+ 									<listOptionValue builtIn="false" value="../../../../../../../../../Utilities/CoproSync"/>
++									<listOptionValue builtIn="false" value="../../../../../../../../../Middlewares/ST/scmiagent"/>
+ 								</option>
+ 								<inputType id="com.st.stm32cube.ide.mcu.gnu.managedbuild.tool.c.compiler.input.c.1325186796" superClass="com.st.stm32cube.ide.mcu.gnu.managedbuild.tool.c.compiler.input.c"/>
+ 							</tool>
+@@ -259,6 +261,7 @@
+ 									<listOptionValue builtIn="false" value="../../../../../../../../../Drivers/CMSIS/Include"/>
+ 									<listOptionValue builtIn="false" value="../../../../../../../../../Utilities/ResourcesManager"/>
+ 									<listOptionValue builtIn="false" value="../../../../../../../../../Utilities/CoproSync"/>
++									<listOptionValue builtIn="false" value="../../../../../../../../../Middlewares/ST/scmiagent"/>
+ 								</option>
+ 								<inputType id="com.st.stm32cube.ide.mcu.gnu.managedbuild.tool.c.compiler.input.c.1325186796" superClass="com.st.stm32cube.ide.mcu.gnu.managedbuild.tool.c.compiler.input.c"/>
+ 							</tool>
+diff --git a/Projects/STM32MP257F-EV1/Examples/SPI/SPI_FullDuplex_ComDMA/STM32CubeIDE/CM33/NonSecure/.project b/Projects/STM32MP257F-EV1/Examples/SPI/SPI_FullDuplex_ComDMA/STM32CubeIDE/CM33/NonSecure/.project
+index 7b2d715..00638b2 100644
+--- a/Projects/STM32MP257F-EV1/Examples/SPI/SPI_FullDuplex_ComDMA/STM32CubeIDE/CM33/NonSecure/.project
++++ b/Projects/STM32MP257F-EV1/Examples/SPI/SPI_FullDuplex_ComDMA/STM32CubeIDE/CM33/NonSecure/.project
+@@ -51,6 +51,26 @@
+ 			<type>1</type>
+ 			<locationURI>PARENT-8-PROJECT_LOC/Utilities/ResourcesManager/res_mgr.c</locationURI>
+ 		</link>
++		<link>
++			<name>Utilities/scmi_clock.c</name>
++			<type>1</type>
++			<locationURI>PARENT-8-PROJECT_LOC/Middlewares/ST/scmiagent/scmi_clock.c</locationURI>
++		</link>
++		<link>
++			<name>Utilities/scmi_helpers.c</name>
++			<type>1</type>
++			<locationURI>PARENT-8-PROJECT_LOC/Middlewares/ST/scmiagent/scmi_helpers.c</locationURI>
++		</link>
++		<link>
++			<name>Utilities/mbox_scmi.c</name>
++			<type>1</type>
++			<locationURI>PARENT-8-PROJECT_LOC/Middlewares/ST/scmiagent/mbox_scmi.c</locationURI>
++		</link>
++		<link>
++			<name>Utilities/scmi_regu.c</name>
++			<type>1</type>
++			<locationURI>PARENT-8-PROJECT_LOC/Middlewares/ST/scmiagent/scmi_regu.c</locationURI>
++		</link>
+ 		<link>
+ 			<name>Application/Startup/startup_stm32mp257cxx_m33.s</name>
+ 			<type>1</type>
+@@ -71,16 +91,6 @@
+ 			<type>1</type>
+ 			<locationURI>PARENT-3-PROJECT_LOC/CM33/NonSecure/Src/stm32mp2xx_it.c</locationURI>
+ 		</link>
+-		<link>
+-			<name>Drivers/STM32MP2xx_HAL_Driver/stm32mp2xx_hal_icache.c</name>
+-			<type>1</type>
+-			<locationURI>PARENT-8-PROJECT_LOC/Drivers/STM32MP2xx_HAL_Driver/Src/stm32mp2xx_hal_icache.c</locationURI>
+-		</link>
+-		<link>
+-			<name>Drivers/STM32MP2xx_HAL_Driver/stm32mp2xx_hal_dcache.c</name>
+-			<type>1</type>
+-			<locationURI>PARENT-8-PROJECT_LOC/Drivers/STM32MP2xx_HAL_Driver/Src/stm32mp2xx_hal_dcache.c</locationURI>
+-		</link>
+ 		<link>
+ 			<name>Application/User/syscalls.c</name>
+ 			<type>1</type>
+@@ -101,6 +111,11 @@
+ 			<type>1</type>
+ 			<locationURI>PARENT-8-PROJECT_LOC/Drivers/STM32MP2xx_HAL_Driver/Src/stm32mp2xx_hal_cortex.c</locationURI>
+ 		</link>
++		<link>
++			<name>Drivers/STM32MP2xx_HAL_Driver/stm32mp2xx_hal_dcache.c</name>
++			<type>1</type>
++			<locationURI>PARENT-8-PROJECT_LOC/Drivers/STM32MP2xx_HAL_Driver/Src/stm32mp2xx_hal_dcache.c</locationURI>
++		</link>
+ 		<link>
+ 			<name>Drivers/STM32MP2xx_HAL_Driver/stm32mp2xx_hal_dma.c</name>
+ 			<type>1</type>
+@@ -136,6 +151,11 @@
+ 			<type>1</type>
+ 			<locationURI>PARENT-8-PROJECT_LOC/Drivers/STM32MP2xx_HAL_Driver/Src/stm32mp2xx_hal_i2c_ex.c</locationURI>
+ 		</link>
++		<link>
++			<name>Drivers/STM32MP2xx_HAL_Driver/stm32mp2xx_hal_icache.c</name>
++			<type>1</type>
++			<locationURI>PARENT-8-PROJECT_LOC/Drivers/STM32MP2xx_HAL_Driver/Src/stm32mp2xx_hal_icache.c</locationURI>
++		</link>
+ 		<link>
+ 			<name>Drivers/STM32MP2xx_HAL_Driver/stm32mp2xx_hal_ipcc.c</name>
+ 			<type>1</type>
+-- 
+2.56.1.windows.1
+
