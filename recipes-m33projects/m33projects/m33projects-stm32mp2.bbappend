@@ -25,6 +25,8 @@ PROJECTS_LIST_M33 = " \
     STM32MP257F-EV1/Applications/OpenAMP/OpenAMP_TTY_echo \
 "
 
+M33FW_FIRMWARE[stm32mp257f-phyflex] = "${@' '.join('Projects/%s,%s' % (path, path.rsplit('/', 1)[-1]) for path in d.getVar('PROJECTS_LIST_M33').split())}"
+
 # Add project-specific build support to each patched upstream example.
 python do_patch:append() {
     import shutil
