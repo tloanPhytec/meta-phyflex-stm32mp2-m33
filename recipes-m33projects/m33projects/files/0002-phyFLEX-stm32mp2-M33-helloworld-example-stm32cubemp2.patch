@@ -1,4 +1,4 @@
-From fd676e1e5d1cf4164b8439de327f2d5a49b91a67 Mon Sep 17 00:00:00 2001
+From 2182e2a169d0a40a8ed0f0ef03e30beff9730edf Mon Sep 17 00:00:00 2001
 From: True Loan <tloan@phytec.com>
 Date: Fri, 13 Nov 2026 16:52:33 -0800
 Subject: [PATCH 2/6] phyFLEX-stm32mp2 M33 helloworld example: stm32cubemp2
@@ -15,12 +15,20 @@ Subject: [PATCH 2/6] phyFLEX-stm32mp2 M33 helloworld example: stm32cubemp2
    interrupt handler starts/stops it), since most people expect something like a HelloWorld
    to start.
 
+   UART5 initialization now leaves an already-enabled GPIOG clock alone and
+   requests RCC access only when that clock needs to be enabled. It verifies
+   that UART5 is clocked and out of reset before accessing its registers.
+
+   Shutdown disables the UART5 interrupt before touching the peripheral,
+   accesses its registers only when available, and disables its clock only
+   if this firmware enabled it.
+
 Signed-off-by: True Loan <tloan@phytec.com>
 ---
- .../CM33/NonSecure/Inc/main.h                 | 18 ++---
- .../CM33/NonSecure/Src/main.c                 | 67 +++++++++++++++----
- .../CM33/NonSecure/Src/stm32mp2xx_it.c        |  2 +
- 3 files changed, 65 insertions(+), 22 deletions(-)
+ .../CM33/NonSecure/Inc/main.h                 |  18 +--
+ .../CM33/NonSecure/Src/main.c                 | 118 ++++++++++++++----
+ .../CM33/NonSecure/Src/stm32mp2xx_it.c        |   2 +
+ 3 files changed, 106 insertions(+), 32 deletions(-)
 
 diff --git a/Projects/STM32MP257F-EV1/Examples_LL/USART/USART_Communication_Rx_IT/CM33/NonSecure/Inc/main.h b/Projects/STM32MP257F-EV1/Examples_LL/USART/USART_Communication_Rx_IT/CM33/NonSecure/Inc/main.h
 index e579cd7..98dd660 100644
@@ -61,18 +69,20 @@ index e579cd7..98dd660 100644
  /* USER CODE END EC */
  
 diff --git a/Projects/STM32MP257F-EV1/Examples_LL/USART/USART_Communication_Rx_IT/CM33/NonSecure/Src/main.c b/Projects/STM32MP257F-EV1/Examples_LL/USART/USART_Communication_Rx_IT/CM33/NonSecure/Src/main.c
-index e02dc09..4545d9f 100644
+index e02dc09..b8e48c0 100644
 --- a/Projects/STM32MP257F-EV1/Examples_LL/USART/USART_Communication_Rx_IT/CM33/NonSecure/Src/main.c
 +++ b/Projects/STM32MP257F-EV1/Examples_LL/USART/USART_Communication_Rx_IT/CM33/NonSecure/Src/main.c
-@@ -57,6 +57,7 @@ static __IO uint8_t KeyPressed = 1;
+@@ -57,6 +57,9 @@ static __IO uint8_t KeyPressed = 1;
  #ifdef DEBUG
  volatile int debug = 1;
  #endif
 +static volatile uint8_t printing = 1U;
++static volatile uint8_t uart5_clock_enabled_here;
++static volatile uint8_t uart5_registers_ready;
  /* handler declaration */
  IPCC_HandleTypeDef hipcc1;
  /* USER CODE BEGIN PV */
-@@ -107,6 +108,7 @@ int main(void)
+@@ -107,6 +110,7 @@ int main(void)
         - Set NVIC Group Priority to 4
         - Low Level Initialization
       */
@@ -80,7 +90,7 @@ index e02dc09..4545d9f 100644
    /* USER CODE END 1 */
  
    /* MCU Configuration--------------------------------------------------------*/
-@@ -154,12 +156,34 @@ int main(void)
+@@ -154,12 +158,34 @@ int main(void)
    MX_USART_Init();
  
    /* USER CODE BEGIN 2 */
@@ -115,7 +125,7 @@ index e02dc09..4545d9f 100644
      /* USER CODE BEGIN 3 */
    }
    /* USER CODE END 3 */
-@@ -331,13 +355,13 @@ static void MX_GPIO_Init(void)
+@@ -331,13 +357,13 @@ static void MX_GPIO_Init(void)
  void LED_Init(void)
  {
    /* Enable the LED3 Clock */
@@ -131,7 +141,7 @@ index e02dc09..4545d9f 100644
    {
      Error_Handler();
    }
-@@ -354,7 +378,7 @@ void LED_Init(void)
+@@ -354,7 +380,7 @@ void LED_Init(void)
  void LED_DeInit(void)
  {
    /* Release GPIOJ6 using Resource manager */
@@ -140,7 +150,7 @@ index e02dc09..4545d9f 100644
  }
  
  /**
-@@ -378,13 +402,13 @@ void UserButton_Init()
+@@ -378,13 +404,13 @@ void UserButton_Init()
    LL_EXTI_InitTypeDef exti_initstruct;
  
    /* Enable GPIOG clock */
@@ -156,7 +166,7 @@ index e02dc09..4545d9f 100644
    {
      Error_Handler();
    }
-@@ -408,7 +432,7 @@ void UserButton_Init()
+@@ -408,7 +434,7 @@ void UserButton_Init()
    LL_EXTI_Init(EXTI2, &exti_initstruct);
  
    /* -2- Connect External Line to the GPIO*/
@@ -165,7 +175,7 @@ index e02dc09..4545d9f 100644
  
    /*-4- Configure NVIC for EXTI15_10_IRQn */
    NVIC_EnableIRQ(USER2_BUTTON_EXTI_IRQn);
-@@ -422,7 +446,7 @@ void UserButton_Init()
+@@ -422,7 +448,7 @@ void UserButton_Init()
  void UserButton_DeInit(void)
  {
    /* Release GPIOG8 using Resource manager */
@@ -174,7 +184,28 @@ index e02dc09..4545d9f 100644
  
    /* Disable NVIC for EXTI15_10_IRQn */
    NVIC_DisableIRQ(USER2_BUTTON_EXTI_IRQn);
-@@ -484,8 +508,8 @@ void MX_USART_Init(void)
+@@ -461,10 +487,18 @@ void MX_USART_Init(void)
+   {
+     Error_Handler();
+   }
+-  /* Enable GPIOs power supplies */
+-  if (RESMGR_STATUS_ACCESS_OK == ResMgr_Request(RESMGR_RESOURCE_RIF_RCC, RESMGR_RCC_RESOURCE(96)))
++  /* Request RCC access only if the GPIOG clock needs to be enabled. */
++  if (!__HAL_RCC_GPIOG_IS_CLK_ENABLED())
+   {
++    if (ResMgr_Request(RESMGR_RESOURCE_RIF_RCC, RESMGR_RCC_RESOURCE(96)) != RESMGR_STATUS_ACCESS_OK)
++    {
++      Error_Handler();
++    }
+     LL_RCC_GPIOG_EnableClock();
++    if (!__HAL_RCC_GPIOG_IS_CLK_ENABLED())
++    {
++      Error_Handler();
++    }
+   }
+ 
+   /* Configure Tx Pin as : Alternate function, High Speed, Push pull, Pull up */
+@@ -484,11 +518,26 @@ void MX_USART_Init(void)
    /* (2) NVIC Configuration for USART interrupts */
    /*  - Set priority for UART5_IRQn */
    /*  - Enable UART5_IRQn */
@@ -182,10 +213,30 @@ index e02dc09..4545d9f 100644
 -  NVIC_EnableIRQ(UART5_IRQn);
 +  //NVIC_SetPriority(UART5_IRQn, 0);
 +  //NVIC_EnableIRQ(UART5_IRQn);
++
++  /* UART5 access was granted above. Leave an existing clock enable in place. */
++  if (!__HAL_RCC_UART5_IS_CLK_ENABLED())
++  {
++    LL_RCC_UART5_EnableClock();
++    if (!__HAL_RCC_UART5_IS_CLK_ENABLED())
++    {
++      Error_Handler();
++    }
++    uart5_clock_enabled_here = 1U;
++  }
  
-   /* (3) Enable USART peripheral clock and clock source ***********************/
-   LL_RCC_UART5_EnableClock();
-@@ -528,8 +552,8 @@ void MX_USART_Init(void)
+-  /* (3) Enable USART peripheral clock and clock source ***********************/
+-  LL_RCC_UART5_EnableClock();
++  /* A UART register access can fault while the peripheral is held in reset. */
++  if (READ_BIT(RCC->UART5CFGR, RCC_UART5CFGR_UART5RST) != 0U)
++  {
++    Error_Handler();
++  }
++  uart5_registers_ready = 1U;
+ 
+   /* (4) Configure USART functional parameters ********************************/
+ 
+@@ -528,8 +577,8 @@ void MX_USART_Init(void)
    }
  
    /* Enable RXNE and Error interrupts */
@@ -196,7 +247,34 @@ index e02dc09..4545d9f 100644
  }
  
  /**
-@@ -732,10 +756,27 @@ void Error_Handler(void)
+@@ -539,14 +588,20 @@ void MX_USART_Init(void)
+   */
+ void MX_USART_DeInit(void)
+ {
+-  /* Disable USART */
+-  LL_USART_Disable(UART5);
++  /* Disable USARTx_IRQn before accessing or gating the peripheral. */
++  NVIC_DisableIRQ(UART5_IRQn);
+ 
+-  /* Disable USART peripheral clock */
+-  LL_RCC_UART5_DisableClock();
++  if (uart5_registers_ready &&
++      READ_BIT(RCC->UART5CFGR, RCC_UART5CFGR_UART5EN | RCC_UART5CFGR_UART5RST) ==
++        RCC_UART5CFGR_UART5EN)
++  {
++    LL_USART_Disable(UART5);
++  }
+ 
+-  /* Disable USARTx_IRQn */
+-  NVIC_DisableIRQ(UART5_IRQn);
++  if (uart5_clock_enabled_here && __HAL_RCC_UART5_IS_CLK_ENABLED())
++  {
++    LL_RCC_UART5_DisableClock();
++  }
+ 
+   /* Release UART5 using Release Manager */
+   (void) ResMgr_Release(RESMGR_RESOURCE_RIFSC, STM32MP25_RIFSC_UART5_ID);
+@@ -732,10 +787,27 @@ void Error_Handler(void)
    */
  void UserButton_Callback(void)
  {
