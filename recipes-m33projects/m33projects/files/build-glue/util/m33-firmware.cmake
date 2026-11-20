@@ -9,6 +9,7 @@ set(bsp "${cube}/Drivers/BSP/STM32MP257F-EV1")
 set(utilities "${cube}/Utilities")
 set(scmi "${cube}/Middlewares/ST/scmiagent")
 set(openamp "${cube}/Middlewares/Third_Party/OpenAMP")
+set(m33_device STM32MP257Fxx)
 
 function(add_m33_firmware)
     set(target "${PROJECT_NAME}.elf")
@@ -21,7 +22,7 @@ function(add_m33_firmware)
         "${utilities}/CoproSync" "${utilities}/ResourcesManager"
     )
     target_compile_definitions("${target}" PRIVATE
-        CORE_CM33 STM32MP25xxxx STM32MP257Fxx
+        CORE_CM33 STM32MP25xxxx ${m33_device}
         USE_STM32MP257F_EV1 STM32MP257F_EV1 STM32MP257FAIx STM32MP25xx_EVAL
     )
     separate_arguments(compile_flags NATIVE_COMMAND "${COMMON_COMPILE_FLAGS}")

@@ -4,6 +4,9 @@ project(OpenAMP_TTY_echo_CM33_NonSecure C ASM)
 
 include(util/m33-firmware.cmake)
 
+# Match CubeIDE so Linux assigns the RPMsg vring addresses.
+set(m33_device STM32MP257Cxx)
+
 # Generate the libmetal headers using ST's generic ARM configuration.
 execute_process(
     COMMAND "${CMAKE_COMMAND}" -S "${openamp}/libmetal"
