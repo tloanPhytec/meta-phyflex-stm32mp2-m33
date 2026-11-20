@@ -1,4 +1,4 @@
-From 229d51b58e95d3a69d4ab6cd08710e66a14cf741 Mon Sep 17 00:00:00 2001
+From ca2990a1dc978b32b20469d37fe81526b75bc36c Mon Sep 17 00:00:00 2001
 From: True Loan <tloan@phytec.com>
 Date: Fri, 13 Nov 2026 17:12:56 -0800
 Subject: [PATCH 3/6] phyFLEX-stm32mp2 M33 I2C Temp Sensor example:

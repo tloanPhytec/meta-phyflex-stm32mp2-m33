@@ -1,4 +1,4 @@
-From 7d2b7ace30b3817d47370278bfe5e5cd19a10f79 Mon Sep 17 00:00:00 2001
+From e928f39fb5db636d5b73005c5737e60a2e313e12 Mon Sep 17 00:00:00 2001
 From: True Loan <tloan@phytec.com>
 Date: Thu, 19 Nov 2026 10:32:20 -0800
 Subject: [PATCH 6/6] phyFLEX-stm32mp2 M33 OpenAMP TTY echo example:

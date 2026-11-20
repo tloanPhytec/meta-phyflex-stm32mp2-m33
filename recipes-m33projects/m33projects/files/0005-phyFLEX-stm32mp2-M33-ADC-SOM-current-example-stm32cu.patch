@@ -1,4 +1,4 @@
-From d1e4d482533f61a34866e44f87b2298cc6baac82 Mon Sep 17 00:00:00 2001
+From 37678bb99379db51da3f3a6bcffb000fc309652b Mon Sep 17 00:00:00 2001
 From: True Loan <tloan@phytec.com>
 Date: Wed, 18 Nov 2026 13:13:55 -0800
 Subject: [PATCH 5/6] phyFLEX-stm32mp2 M33 ADC SOM current example:
