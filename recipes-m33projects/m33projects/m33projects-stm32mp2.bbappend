@@ -25,7 +25,12 @@ PROJECTS_LIST_M33 = " \
     STM32MP257F-EV1/Applications/OpenAMP/OpenAMP_TTY_echo \
 "
 
+M33PROJECT_TF_M_TRUSTZONE = "0"
+
 M33FW_FIRMWARE[stm32mp257f-phyflex] = "${@' '.join('Projects/%s,%s' % (path, path.rsplit('/', 1)[-1]) for path in d.getVar('PROJECTS_LIST_M33').split())}"
+
+M33FW_DEFAULT_FIRMWARE[stm32mp257f-phyflex] = "${@'GPIO_EXTI' if d.getVar('M33_PRODUCTION_ACTIVE') == '1' else ''}"
+M33_BOARDS_START_AT_STARTUP:append = "${@' stm32mp257f-phyflex-libra-rdk' if d.getVar('M33_PRODUCTION_ACTIVE') == '1' else ''}"
 
 # Add project-specific build support to each patched upstream example.
 python do_patch:append() {
@@ -44,4 +49,21 @@ python do_patch:append() {
 do_install:append() {
     mv "${D}${M33_OUTPUT_4USERFS}/STM32MP257F-EV1" \
        "${D}${M33_OUTPUT_4USERFS}/STM32MP257F-PHYFLEX_tloan"
+
+    # Reuse ST's default-project marker and enabled firmware-loading service.
+    if [ "${M33_PRODUCTION_ACTIVE}" = "1" ]; then
+        # ST lowercases the board name but not the compatible string (phyFLEX).
+        for loader in "${D}${sysconfdir}/init.d/st-m33firmware-load-default.sh" \
+                      "${D}${base_sbindir}/st-m33firmware-load-default.sh"; do
+            sed -i '/^[[:space:]]*comp_board=/s/)[[:space:]]*$/ | tr "[:upper:]" "[:lower:]")/' "$loader"
+        done
+
+        # Firmware lives in userfs, mounted at /usr/local.
+        if [ -f "${D}${systemd_unitdir}/system/st-m33firmware-load.service" ]; then
+            sed -i '/^\[Unit\]/a RequiresMountsFor=${M33_OUTPUT_4USERFS}' \
+                "${D}${systemd_unitdir}/system/st-m33firmware-load.service"
+            sed -i 's/^WantedBy=sysinit.target$/WantedBy=multi-user.target/' \
+                "${D}${systemd_unitdir}/system/st-m33firmware-load.service"
+        fi
+    fi
 }

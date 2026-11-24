@@ -18,10 +18,10 @@ With the phyFLEX-STM32MP25x Cortex-A35 cluster running Linux, the firmware intro
   * LED and current-limiting series resistor (~100 Ohm)
   * Bread Board for circuit prototyping
 
-This was tested with BSP-Yocto-OpenSTLinux-STM32MP2-PD26.1.0 and was based on STM32CubeMP2 v1.3.2.
+This was tested with BSP-Yocto-OpenSTLinux-STM32MP2-PD26.2.0 and was based on STM32CubeMP2 v1.3.2.
 
 >[!NOTE]
-> **The Cortex-M33 firmware introduced by this meta layer cannot be used while a PEB-AV-10 device tree overlay is enabled at the same time (these are disabled by default in BSP-Yocto-OpenSTLinux-STM32MP2-PD26.1.0) due to pin resource conflicts**
+> **The Cortex-M33 firmware introduced by this meta layer cannot be used while a PEB-AV-10 device tree overlay is enabled at the same time (these are disabled by default in BSP-Yocto-OpenSTLinux-STM32MP2-PD26.2.0) due to pin resource conflicts**
 
 ## BSP Integration
 
@@ -51,6 +51,16 @@ DISTRO=openstlinux-weston MACHINE=stm32mp25x-phyflex-libra-rdk-3 bitbake st-imag
 
 Prepare a bootable SD Card for your phyFLEX-STM32MP25x Development Kit with the resulting image.
 
+### Cortex-M33 in Production
+
+For MACHINE=stm32mp25x-phyflex-libra-rdk-3, add the following to your BSP's conf/local.conf before building the image:
+
+```bitbake
+M33_PRODUCTION_ENABLE = "1"
+```
+
+This enables the M33 examples overlay in the generated boot configuration and selects GPIO_EXTI as the default firmware loaded by `st-m33firmware-load.service`. With M33_PRODUCTION_ENABLE set, no manual overlay activation or reboot is required on the first boot.
+
 ## Hardware Hookup
 
 ### LED and Button Hookup
@@ -78,12 +88,12 @@ The USART, I2C, SPI, ADC, and OpenAMP examples all print something to UART5. In 
 
 ### Configure Software on First Boot
 
-Prior to running the Cortex-M33 firmware introduced by this meta layer, we must instruct the kernel to disable the various peripheral interfaces they use in order to avoid resouce conflicts (those peripherals are allocated for Linux in the default BSP-Yocto-OpenSTLinux-STM32MP2-PD26.1.0 pre-built images).
+Prior to running the Cortex-M33 firmware introduced by this meta layer, we must instruct the kernel to disable the various peripheral interfaces they use in order to avoid resouce conflicts (those peripherals are allocated for Linux in the default BSP-Yocto-OpenSTLinux-STM32MP2-PD26.2.0 pre-built images).
 
-This meta layer introduces a new device tree overlay that accomplishes just that (/boot/overlays/stm32mp2-phyflex-libra-rdk-m33-examples.dtbo), we just need to enable it on the first boot and then reboot:
+This meta layer introduces a new device tree overlay that accomplishes just that (/boot/stm32mp2-phyflex-libra-rdk-m33-examples.dtbo, but technically the loaded into memory is built into the kernel fitImage), we just need to enable it on the first boot and then reboot:
 
 ```sh
-sed -i '/^overlay=/s/$/ stm32mp2-phyflex-libra-rdk-m33-examples/' /boot/overlays/overlays.txt
+echo "$(cat /boot/overlays.txt)#conf-stm32mp2-phyflex-libra-rdk-m33-examples.dtbo" > /boot/overlays.txt
 reboot
 ```
 
@@ -150,7 +160,7 @@ The Cortex-M33 will echo back these messages with a message prefix attached.
 
 ## Verbose Description
 
-This meta-phyflex-stm32mp2-m33 Yocto Meta Layer serves to improve the STM32CubeMP2 evaluation experience using the default BSP-Yocto-OpenSTLinux-STM32MP2-PD26.1.0 release. The default STM32CubeMP2 examples included in the BSP work but there are a couple quality-of-life issues for developers using it as a basis for development:
+This meta-phyflex-stm32mp2-m33 Yocto Meta Layer serves to improve the STM32CubeMP2 evaluation experience using the default BSP-Yocto-OpenSTLinux-STM32MP2-PD26.2.0 release. The default STM32CubeMP2 examples included in the BSP work but there are a couple quality-of-life issues for developers using it as a basis for development:
 
 * the default GPIO_EXTI example configures the Cortex-M33's input interrupt GPIO on a Fan Connector (X68) pin, thus it's not very safe or convenient to access and pull low.
 * the default GPIO_EXTI example lacked debounce logic, where one button press could look like nothing happened due to the bounce in the contact (when two button presses occur very quickly, the second one can cancel the first).

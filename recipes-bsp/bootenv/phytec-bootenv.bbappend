@@ -1,0 +1,1 @@
+BOOTENV_OVERLAYS_APPEND:prepend = "${@bb.utils.contains('KERNEL_IMAGETYPES', 'fitImage', 'conf-', '', d) + 'stm32mp2-phyflex-libra-rdk-m33-examples.dtbo ' if d.getVar('M33_PRODUCTION_ACTIVE') == '1' else ''}"
