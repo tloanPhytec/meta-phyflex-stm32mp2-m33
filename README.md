@@ -59,7 +59,7 @@ For MACHINE=stm32mp25x-phyflex-libra-rdk-3, add the following to your BSP's conf
 M33_PRODUCTION_ENABLE = "1"
 ```
 
-This enables the M33 examples overlay in the generated boot configuration and selects GPIO_EXTI as the default firmware loaded by `st-m33firmware-load.service`. With M33_PRODUCTION_ENABLE set, no manual overlay activation or reboot is required on the first boot.
+This enables the M33 device tree overlay in the default boot environment and selects GPIO_EXTI as the default firmware loaded by `st-m33firmware-load.service`. With M33_PRODUCTION_ENABLE set, no manual overlay activation or reboot is required on the first boot, and your M33 firmware starts automatically without user interaction.
 
 ## Hardware Hookup
 
